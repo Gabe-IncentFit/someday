@@ -20,7 +20,7 @@ import { Else, Show, When } from "@/components/WhenShowElse";
 import { Timeslots } from "@/models/Timeslots";
 import { EventType } from "@/models/EventType";
 import { addMonths, format, startOfMonth } from "date-fns";
-import { formatInTimeZone } from "date-fns-tz";
+import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
 import {
   ArrowLeft,
   ChevronLeft,
@@ -98,8 +98,12 @@ export function CalendarPicker({
       note: formData.get("note")?.toString() || "none",
     };
     if (!selectedTimeSlot) throw new Error("No timeslot selected");
+    // selectedTimeSlot is a zoned Date used only for display; its getTime() is
+    // shifted off the real instant when the chosen timezone differs from the
+    // browser's. Recover the true UTC instant before booking so the meeting
+    // lands at the time the visitor actually picked.
     makeBooking({
-      timeslot: selectedTimeSlot,
+      timeslot: fromZonedTime(selectedTimeSlot, timezone),
       eventTypeId: eventType.id,
       ...payload,
     });
@@ -127,7 +131,11 @@ export function CalendarPicker({
         <h1>Thank You!</h1>
         <h2>Your appointment has been booked successfully.</h2>
         <div className="font-bold font-mono">
-          {formatInTimeZone(selectedTimeSlot!, timezone, "MMMM d, yyyy h:mm a")}
+          {formatInTimeZone(
+            fromZonedTime(selectedTimeSlot!, timezone),
+            timezone,
+            "MMMM d, yyyy h:mm a"
+          )}
         </div>
       </Card>
     );

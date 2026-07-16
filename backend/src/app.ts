@@ -510,22 +510,25 @@ function bookTimeslot(
     }
   }
 
-  // Authoritative max-bookings check. Hold a script lock across the count-check
-  // AND the event creation below so two concurrent bookings for the last slot in
-  // a period can't both pass the check and both create events. Count over a
-  // window that comfortably covers the slot's period, then look up the slot's
-  // own period bucket.
-  let bookingLock: GoogleAppsScript.Lock.Lock | null = null;
+  // Serialize the freebusy check and the event creation under the script lock so
+  // two concurrent bookings of the same slot can't both pass freebusy and both
+  // insert (TOCTOU double-booking). Acquired unconditionally — it previously
+  // wrapped only the max-bookings path, leaving unlimited event types racy. The
+  // lock is global to the script and also covers the count-then-insert below.
+  const bookingLock = LockService.getScriptLock();
+  try {
+    bookingLock.waitLock(15000);
+  } catch (e) {
+    throw new Error("Server is busy, please try again");
+  }
+
+  // Authoritative max-bookings pre-check (only when a limit is active). Count
+  // over a window that comfortably covers the slot's period, then look up the
+  // slot's own period bucket. This runs before the create-event try below, so
+  // release the lock on any failure here (including the count query throwing)
+  // and rethrow unchanged; on success the lock stays held through event
+  // creation, where the finally block releases it.
   if (hasBookingLimit(eventType)) {
-    bookingLock = LockService.getScriptLock();
-    try {
-      bookingLock.waitLock(15000);
-    } catch (e) {
-      throw new Error("Server is busy, please try again");
-    }
-    // Release the lock on any failure within the pre-check itself (including the
-    // count query throwing), then rethrow unchanged. On the happy path the lock
-    // stays held through event creation, where the finally block releases it.
     try {
       const tz = CONFIG.TIME_ZONE;
       const period = eventType.maxBookingsPeriod!;
@@ -544,7 +547,6 @@ function bookTimeslot(
       }
     } catch (e) {
       bookingLock.releaseLock();
-      bookingLock = null;
       throw e;
     }
   }
@@ -648,6 +650,6 @@ function bookTimeslot(
     }
     throw new Error(`Failed to create event: ${error.message}`);
   } finally {
-    if (bookingLock) bookingLock.releaseLock();
+    bookingLock.releaseLock();
   }
 }

@@ -6,7 +6,8 @@ export interface EventType {
     description?: string;
     WORKDAYS?: number[];
     WORKHOURS?: { start: number; end: number };
-    DAYS_IN_ADVANCE?: number;
+    MAX_DAYS_IN_ADVANCE?: number;
+    MIN_DAYS_IN_ADVANCE?: number;
     CALENDARS?: string[];
     schedulingStrategy?: 'collective' | 'round_robin';
     // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
@@ -25,7 +26,8 @@ export interface Config {
     TIME_ZONE: string;
     WORKDAYS: number[];
     WORKHOURS: { start: number; end: number };
-    DAYS_IN_ADVANCE: number;
+    MAX_DAYS_IN_ADVANCE: number;
+    MIN_DAYS_IN_ADVANCE?: number;
     EVENT_TYPES: EventType[];
     CALENDARS: string[];
     schedulingStrategy?: 'collective' | 'round_robin';

@@ -52,7 +52,7 @@ function App() {
             TIME_ZONE: "America/New_York",
             WORKDAYS: [1, 2, 3, 4, 5],
             WORKHOURS: { start: 9, end: 16 },
-            DAYS_IN_ADVANCE: 28,
+            MAX_DAYS_IN_ADVANCE: 28,
             EVENT_TYPES: [
               { id: "30min", name: "30 Minute Meeting", duration: 30, selectable: true },
               { id: "60min", name: "1 Hour Strategy", duration: 60, selectable: true },

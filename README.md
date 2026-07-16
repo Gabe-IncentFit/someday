@@ -47,6 +47,7 @@ Someday includes a built-in **Settings** screen for easy configuration.
    **Global Defaults**:
    - **Time Zone**: Set your primary time zone for availability calculations.
    - **Scheduling Window**: Control how many days into the future users can book (up to 90 days).
+   - **Minimum Notice**: Require bookings to be at least a set number of days out, so you always have lead time to prepare (0 for no minimum).
    - **Work Hours**: Define your standard daily window of availability.
    - **Available Days**: Select which days of the week you normally accept bookings.
    - **Monitored Calendars**: Choose multiple calendars to check for conflicts (e.g., Personal, Work, Holidays). You can add teammate calendars or any calendar you have read access to by entering their email address.
@@ -66,7 +67,7 @@ Someday includes a built-in **Settings** screen for easy configuration.
      - **Public**: Event details are publicly visible to everyone
      - **Private**: Shows only as "Busy" without revealing event details
    - **Max Bookings**: Limit how many times an event type can be booked within a rolling period. Enter a number and choose **day**, **week**, **month**, **quarter**, or **year** (weeks start on Sunday; quarters and years are calendar-based, all in your configured time zone). Leave it blank for no limit (the default). The limit applies to the event type as a whole — across all monitored calendars for Round-Robin. Once a period reaches its cap, its slots disappear from the booking page and a final server-side check rejects any attempt to exceed it. Note: only bookings made after this feature is enabled are counted.
-   - **Smart Overrides**: Override global Work Hours, Available Days, Monitored Calendars, and Scheduling Strategy for specific event types.
+   - **Smart Overrides**: Override global Work Hours, Available Days, Scheduling Window, Minimum Notice, Monitored Calendars, and Scheduling Strategy for specific event types.
    - **Per-Event Strategies**: Set different scheduling strategies for different event types (e.g., Round-Robin for sales calls, Collective for team meetings).
    - **Direct Links**: Copy a unique booking URL for any event type to share directly.
    - **Visibility Controls**: Toggle which event types are displayed on your main public scheduling page.

@@ -162,7 +162,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                         TIME_ZONE: "America/New_York",
                         WORKDAYS: [1, 2, 3, 4, 5],
                         WORKHOURS: { start: 9, end: 16 },
-                        DAYS_IN_ADVANCE: 28,
+                        MAX_DAYS_IN_ADVANCE: 28,
                         EVENT_TYPES: [
                             { id: "30min", name: "30 Minute Meeting", duration: 30, selectable: true },
                             { id: "60min", name: "1 Hour Strategy", duration: 60, selectable: true },
@@ -188,8 +188,20 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
 
         // Enforce maximum 90 days for scheduling window
         // Higher numbers can make the system slow due to increased calendar fetching overhead
-        if (config.DAYS_IN_ADVANCE > 90) {
+        if (config.MAX_DAYS_IN_ADVANCE > 90) {
             alert("Scheduling window cannot exceed 90 days.");
+            return;
+        }
+
+        // Minimum notice must fit inside the scheduling window, otherwise no
+        // slots would ever be bookable.
+        const globalMinDays = config.MIN_DAYS_IN_ADVANCE ?? 0;
+        if (globalMinDays < 0) {
+            alert("Minimum notice cannot be negative.");
+            return;
+        }
+        if (globalMinDays >= config.MAX_DAYS_IN_ADVANCE) {
+            alert("Minimum notice must be less than the scheduling window.");
             return;
         }
 
@@ -201,6 +213,22 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             }
             if (!et.id) {
                 alert("All event types must have a slug/id.");
+                return;
+            }
+            // Validate the per-event minimum-notice override value itself.
+            if (et.MIN_DAYS_IN_ADVANCE !== undefined &&
+                (!Number.isInteger(et.MIN_DAYS_IN_ADVANCE) || et.MIN_DAYS_IN_ADVANCE < 0)) {
+                alert(`Minimum notice for ${et.name} must be a non-negative whole number.`);
+                return;
+            }
+            // The effective minimum notice must fit inside the effective window
+            // so the event still has bookable slots. Check this whichever of the
+            // two the event overrides — an event that overrides only the window
+            // can still inherit a larger global minimum.
+            const effectiveMin = et.MIN_DAYS_IN_ADVANCE ?? globalMinDays;
+            const effectiveMax = et.MAX_DAYS_IN_ADVANCE ?? config.MAX_DAYS_IN_ADVANCE;
+            if (effectiveMin >= effectiveMax) {
+                alert(`Minimum notice for ${et.name} (${effectiveMin} days) must be less than its scheduling window (${effectiveMax} days).`);
                 return;
             }
             if (et.maxBookings !== undefined) {
@@ -370,14 +398,39 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                 min="1"
                                 max="90"
                                 className="w-full pr-12"
-                                value={config.DAYS_IN_ADVANCE}
+                                value={config.MAX_DAYS_IN_ADVANCE}
                                 onChange={(e) => {
                                     const val = parseInt(e.target.value, 10);
                                     if (!isNaN(val)) {
-                                        setConfig({ ...config, DAYS_IN_ADVANCE: Math.max(1, val) });
+                                        setConfig({ ...config, MAX_DAYS_IN_ADVANCE: Math.min(90, Math.max(1, val)) });
                                     } else {
-                                        setConfig({ ...config, DAYS_IN_ADVANCE: 1 });
+                                        setConfig({ ...config, MAX_DAYS_IN_ADVANCE: 1 });
                                     }
+                                }}
+                            />
+                            <span className="absolute right-3 text-sm text-muted-foreground pointer-events-none">days</span>
+                        </div>
+                    </div>
+
+                    {/* Minimum Notice */}
+                    <div className="space-y-3">
+                        <div className="space-y-1">
+                            <Label htmlFor="minDaysInAdvance" className="text-sm font-medium">Minimum Notice</Label>
+                            <p className="text-xs text-muted-foreground">
+                                How many days out the earliest bookable appointment must be (0 for no minimum).
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-4 relative">
+                            <Input
+                                id="minDaysInAdvance"
+                                type="number"
+                                min="0"
+                                max="90"
+                                className="w-full pr-12"
+                                value={config.MIN_DAYS_IN_ADVANCE ?? 0}
+                                onChange={(e) => {
+                                    const val = parseInt(e.target.value, 10);
+                                    setConfig({ ...config, MIN_DAYS_IN_ADVANCE: isNaN(val) ? 0 : Math.max(0, val) });
                                 }}
                             />
                             <span className="absolute right-3 text-sm text-muted-foreground pointer-events-none">days</span>
@@ -748,9 +801,29 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 </div>
                                                 <Input
                                                     type="number"
-                                                    placeholder={`Global: ${config.DAYS_IN_ADVANCE}`}
-                                                    value={et.DAYS_IN_ADVANCE || ""}
-                                                    onChange={(e) => updateEventType(index, { DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}
+                                                    placeholder={`Global: ${config.MAX_DAYS_IN_ADVANCE}`}
+                                                    value={et.MAX_DAYS_IN_ADVANCE || ""}
+                                                    onChange={(e) => updateEventType(index, { MAX_DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}
+                                                />
+                                            </div>
+
+                                            {/* Minimum Notice Override */}
+                                            <div className="space-y-2">
+                                                <div className="space-y-1">
+                                                    <Label className="text-sm font-medium">Minimum Notice</Label>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        Override the global minimum notice for this event type.
+                                                    </p>
+                                                </div>
+                                                <Input
+                                                    type="number"
+                                                    min="0"
+                                                    placeholder={`Global: ${config.MIN_DAYS_IN_ADVANCE ?? 0}`}
+                                                    value={et.MIN_DAYS_IN_ADVANCE ?? ""}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value, 10);
+                                                        updateEventType(index, { MIN_DAYS_IN_ADVANCE: isNaN(val) ? undefined : Math.max(0, val) });
+                                                    }}
                                                 />
                                             </div>
 

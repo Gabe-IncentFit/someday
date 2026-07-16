@@ -10,7 +10,8 @@ interface EventType {
   description?: string;
   WORKDAYS?: number[];
   WORKHOURS?: { start: number; end: number };
-  DAYS_IN_ADVANCE?: number;
+  MAX_DAYS_IN_ADVANCE?: number;
+  MIN_DAYS_IN_ADVANCE?: number;
   CALENDARS?: string[];
   schedulingStrategy?: 'collective' | 'round_robin';
   // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
@@ -29,7 +30,8 @@ const CONFIG = {
   TIME_ZONE: props.getProperty('TIME_ZONE') || "America/New_York",
   WORKDAYS: JSON.parse(props.getProperty('WORKDAYS') || "[1, 2, 3, 4, 5]"),
   WORKHOURS: JSON.parse(props.getProperty('WORKHOURS') || '{"start": 9, "end": 16}'),
-  DAYS_IN_ADVANCE: parseInt(props.getProperty('DAYS_IN_ADVANCE') || "28", 10),
+  MAX_DAYS_IN_ADVANCE: parseInt(props.getProperty('MAX_DAYS_IN_ADVANCE') || "28", 10),
+  MIN_DAYS_IN_ADVANCE: parseInt(props.getProperty('MIN_DAYS_IN_ADVANCE') || "0", 10),
   EVENT_TYPES: (() => {
     const etProp = props.getProperty('EVENT_TYPES');
     if (etProp) return JSON.parse(etProp) as EventType[];
@@ -73,7 +75,8 @@ function getConfig() {
     TIME_ZONE: CONFIG.TIME_ZONE,
     WORKDAYS: CONFIG.WORKDAYS,
     WORKHOURS: CONFIG.WORKHOURS,
-    DAYS_IN_ADVANCE: CONFIG.DAYS_IN_ADVANCE,
+    MAX_DAYS_IN_ADVANCE: CONFIG.MAX_DAYS_IN_ADVANCE,
+    MIN_DAYS_IN_ADVANCE: CONFIG.MIN_DAYS_IN_ADVANCE,
     EVENT_TYPES: CONFIG.EVENT_TYPES,
     CALENDARS: CONFIG.CALENDARS,
     schedulingStrategy: CONFIG.schedulingStrategy,
@@ -95,7 +98,8 @@ function setConfig(newConfig: Partial<typeof CONFIG>) {
   if (newConfig.TIME_ZONE) props.setProperty('TIME_ZONE', newConfig.TIME_ZONE);
   if (newConfig.WORKDAYS) props.setProperty('WORKDAYS', JSON.stringify(newConfig.WORKDAYS));
   if (newConfig.WORKHOURS) props.setProperty('WORKHOURS', JSON.stringify(newConfig.WORKHOURS));
-  if (newConfig.DAYS_IN_ADVANCE !== undefined) props.setProperty('DAYS_IN_ADVANCE', newConfig.DAYS_IN_ADVANCE.toString());
+  if (newConfig.MAX_DAYS_IN_ADVANCE !== undefined) props.setProperty('MAX_DAYS_IN_ADVANCE', newConfig.MAX_DAYS_IN_ADVANCE.toString());
+  if (newConfig.MIN_DAYS_IN_ADVANCE !== undefined) props.setProperty('MIN_DAYS_IN_ADVANCE', newConfig.MIN_DAYS_IN_ADVANCE.toString());
   if (newConfig.EVENT_TYPES) props.setProperty('EVENT_TYPES', JSON.stringify(newConfig.EVENT_TYPES));
   if (newConfig.CALENDARS) props.setProperty('CALENDARS', JSON.stringify(newConfig.CALENDARS));
   if (newConfig.schedulingStrategy) props.setProperty('schedulingStrategy', newConfig.schedulingStrategy);
@@ -214,6 +218,23 @@ function countBookingsByPeriod(
   return counts;
 }
 
+// UTC instant of midnight in `tz`, `days` whole calendar days after `from`.
+// Used for the minimum-notice boundary so "N days out" is measured as N local
+// days (midnight in the configured time zone), not from UTC midnight — which
+// for a non-UTC zone would let same-evening slots slip past the cutoff.
+function tzMidnightPlusDays(from: Date, tz: string, days: number): Date {
+  const [y, m, d] = Utilities.formatDate(from, tz, "yyyy-MM-dd").split("-").map(Number);
+  // Local wall-clock midnight of the target date, first read as if it were UTC.
+  const wallAsUTC = new Date(Date.UTC(y, m - 1, d + days));
+  // Shift by the zone's offset at that date to get the true UTC instant. "Z"
+  // yields an RFC-822 offset like "-0400"; local = UTC + offset, so the UTC
+  // instant of local midnight is wallAsUTC - offset.
+  const offset = Utilities.formatDate(wallAsUTC, tz, "Z");
+  const sign = offset.charAt(0) === '-' ? -1 : 1;
+  const offsetMin = sign * (parseInt(offset.slice(1, 3), 10) * 60 + parseInt(offset.slice(3, 5), 10));
+  return new Date(wallAsUTC.getTime() - offsetMin * 60000);
+}
+
 function fetchAvailability(eventTypeId?: string): {
   timeslots: string[];
   durationMinutes: number;
@@ -226,7 +247,8 @@ function fetchAvailability(eventTypeId?: string): {
   const timeZone = CONFIG.TIME_ZONE;
   const workDays = eventType.WORKDAYS ?? CONFIG.WORKDAYS;
   const workHours = eventType.WORKHOURS ?? CONFIG.WORKHOURS;
-  const daysInAdvance = eventType.DAYS_IN_ADVANCE ?? CONFIG.DAYS_IN_ADVANCE;
+  const daysInAdvance = eventType.MAX_DAYS_IN_ADVANCE ?? CONFIG.MAX_DAYS_IN_ADVANCE;
+  const minDaysInAdvance = eventType.MIN_DAYS_IN_ADVANCE ?? CONFIG.MIN_DAYS_IN_ADVANCE ?? 0;
   const calendarsToQuery = eventType.CALENDARS ?? CONFIG.CALENDARS;
 
   const nearestTimeslot = new Date(
@@ -240,6 +262,12 @@ function fetchAvailability(eventTypeId?: string): {
       now.getUTCDate() + daysInAdvance
     )
   );
+  // Earliest bookable moment: enforce a minimum lead time so slots sooner than
+  // `minDaysInAdvance` days out are hidden (0 = no minimum). Measured as whole
+  // calendar days in the configured time zone.
+  const minStart = minDaysInAdvance > 0
+    ? tzMidnightPlusDays(now, timeZone, minDaysInAdvance)
+    : now;
 
   const response = Calendar.Freebusy!.query({
     timeMin: now.toISOString(),
@@ -286,6 +314,8 @@ function fetchAvailability(eventTypeId?: string): {
   ) {
     const start = new Date(t);
     const endTime = new Date(t + durationMs);
+    // Enforce the minimum lead time: hide slots earlier than minStart.
+    if (start.getTime() < minStart.getTime()) continue;
     const startTZ = new Date(
       Utilities.formatDate(start, timeZone, "yyyy-MM-dd'T'HH:mm:ss")
     );
@@ -331,6 +361,16 @@ function bookTimeslot(
   }
   const endTime = new Date(startTime.getTime());
   endTime.setUTCMinutes(startTime.getUTCMinutes() + durationMinutes);
+
+  // Authoritative minimum-lead-time check: reject bookings sooner than the
+  // configured minimum days out, so a stale client can't book inside the window.
+  const minDaysInAdvance = eventType.MIN_DAYS_IN_ADVANCE ?? CONFIG.MIN_DAYS_IN_ADVANCE ?? 0;
+  if (minDaysInAdvance > 0) {
+    const minStart = tzMidnightPlusDays(new Date(), CONFIG.TIME_ZONE, minDaysInAdvance);
+    if (startTime.getTime() < minStart.getTime()) {
+      throw new Error("This time is too soon; please choose a later time");
+    }
+  }
 
   // Authoritative max-bookings check. Hold a script lock across the count-check
   // AND the event creation below so two concurrent bookings for the last slot in

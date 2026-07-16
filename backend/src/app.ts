@@ -427,6 +427,32 @@ function fetchAvailability(eventTypeId?: string): {
   return { timeslots, durationMinutes };
 }
 
+// Actionable message for when the booking's target calendar isn't writable.
+// Booking writes an event to the target calendar (Events.insert), which needs
+// writer/owner access; read (freebusy) access only lets us check it for
+// conflicts. See the README "Calendar Access" section.
+function calendarWriteError(calendarId: string): string {
+  return `Cannot create the booking on calendar "${calendarId}": the scheduler `
+    + `only has read access to it. Grant it "Make changes to events" access in `
+    + `Google Calendar, or remove it from this event type's calendars.`;
+}
+
+// Best-effort check of whether the script owner can write to `calendarId`.
+// Returns true/false when the access role is known, or null when it can't be
+// determined (e.g. the calendar isn't in the owner's calendar list) — in which
+// case we let the insert proceed and classify any permission error instead.
+function calendarIsWritable(calendarId: string): boolean | null {
+  try {
+    const entry: any = Calendar.CalendarList!.get(calendarId);
+    const role = entry && entry.accessRole;
+    if (role === 'owner' || role === 'writer') return true;
+    if (role === 'reader' || role === 'freeBusyReader') return false;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function bookTimeslot(
   timeslot: string,
   name: string,
@@ -503,6 +529,9 @@ function bookTimeslot(
     }
   }
 
+  // Chosen inside the try (round-robin picks a free calendar; collective uses
+  // the first), but declared out here so the catch can name it in access errors.
+  let targetCalendarId = calendarsToUse[0];
   try {
     const possibleEvents = Calendar.Freebusy!.query({
       timeMin: startTime.toISOString(),
@@ -515,7 +544,6 @@ function bookTimeslot(
     );
 
     const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
-    let targetCalendarId = calendarsToUse[0];
     let guestsToInvite = [email];
 
     if (strategy === 'round_robin') {
@@ -536,6 +564,15 @@ function bookTimeslot(
       // Collective: Invite all other calendars so everyone is blocked/attending
       const teamGuests = calendarsToUse.filter((id: string) => id !== targetCalendarId);
       guestsToInvite = [...guestsToInvite, ...teamGuests];
+    }
+
+    // Guard: Events.insert below writes to targetCalendarId, which requires
+    // writer/owner access — read (freebusy) access is enough to check a calendar
+    // for conflicts but not to book on it. When we can tell the target is
+    // read-only, fail early with an actionable message (the insert's own
+    // permission error is translated the same way in the catch below).
+    if (calendarIsWritable(targetCalendarId) === false) {
+      throw new Error(calendarWriteError(targetCalendarId));
     }
 
     // Create the event atomically with its event-type tag, using the advanced
@@ -577,6 +614,16 @@ function bookTimeslot(
     return `Timeslot booked successfully`;
   } catch (e) {
     const error = e as Error;
+    // The proactive guard's message is already actionable — pass it through.
+    if (error.message === calendarWriteError(targetCalendarId)) {
+      throw error;
+    }
+    // A permission failure from Events.insert means the target calendar isn't
+    // writable; surface the same actionable message instead of the generic
+    // wrapper. Google reports this as 403 / "forbidden" / "writer access".
+    if (/forbidden|writer access|permission|access denied|insufficient|do not have/i.test(error.message)) {
+      throw new Error(calendarWriteError(targetCalendarId));
+    }
     throw new Error(`Failed to create event: ${error.message}`);
   } finally {
     if (bookingLock) bookingLock.releaseLock();

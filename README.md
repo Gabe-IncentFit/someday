@@ -149,8 +149,8 @@ __you may need to sign out of all accounts, and only into your target account__
 5. **Calendar Access:**
    - By default, the script uses your primary calendar.
    - You can add multiple calendars directly through the **Settings** screen in the UI by selecting from your owned calendars or entering any calendar email address (e.g., teammate@company.com).
-   - The script needs at least read access to any calendar you monitor for conflicts or team scheduling.
-   - For team scheduling, ensure you have appropriate calendar permissions for teammates' calendars you wish to include.
+   - **Conflict-checking** needs only read access to the calendars you monitor.
+   - **Booking writes the event to a _target_ calendar**, which needs write ("Make changes to events") access: for **Round-Robin** that is the assigned teammate's calendar (so every calendar in the rotation must be writable), and for **Collective** it is the first calendar in the list. A read-only target makes booking fail with an explanatory error.
 
 ## Cheat Sheet
 

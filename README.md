@@ -24,6 +24,7 @@ Someday is a simple, open-source scheduling tool designed specifically for Gmail
 - **Team Scheduling**: Add multiple calendars including teammates' calendars (with read access) for collaborative scheduling.
 - **Flexible Scheduling Strategies**: Choose between "Collective" (all team members must be free) or "Round-Robin" (distribute bookings among available team members) scheduling modes.
 - **Guest Permission Controls**: Fine-grained control over what guests can do with booked events (modify, invite others, see attendees) and calendar visibility (public, private, or default).
+- **Booking Limits**: Cap how many times a specific event type can be booked per day, week, or month. Maxed-out periods are hidden from the picker and enforced at booking time.
 - **Dynamic Configuration**: Adjust your timezone, working hours, available days, and monitored calendars globally or per event type directly through the integrated Settings screen.
 - **Owner-Only Access**: Secure access to configuration via the script owner's Google account session.
 - **Simple Booking Process**: Users can select a date and time slot, then fill out a straightforward form with their name, email, phone, and an optional note.
@@ -64,6 +65,7 @@ Someday includes a built-in **Settings** screen for easy configuration.
      - **Default**: Uses your calendar's default visibility setting
      - **Public**: Event details are publicly visible to everyone
      - **Private**: Shows only as "Busy" without revealing event details
+   - **Max Bookings**: Limit how many times an event type can be booked within a rolling period. Enter a number and choose **day**, **week**, or **month** (weeks start on Sunday, in your configured time zone). Leave it blank for no limit (the default). The limit applies to the event type as a whole — across all monitored calendars for Round-Robin. Once a period reaches its cap, its slots disappear from the booking page and a final server-side check rejects any attempt to exceed it. Note: only bookings made after this feature is enabled are counted.
    - **Smart Overrides**: Override global Work Hours, Available Days, Monitored Calendars, and Scheduling Strategy for specific event types.
    - **Per-Event Strategies**: Set different scheduling strategies for different event types (e.g., Round-Robin for sales calls, Collective for team meetings).
    - **Direct Links**: Copy a unique booking URL for any event type to share directly.

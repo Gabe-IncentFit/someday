@@ -9,6 +9,10 @@ export interface EventType {
     DAYS_IN_ADVANCE?: number;
     CALENDARS?: string[];
     schedulingStrategy?: 'collective' | 'round_robin';
+    // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
+    // and maxBookingsPeriod is set. Applies to the whole event type (aggregate).
+    maxBookings?: number;
+    maxBookingsPeriod?: 'day' | 'week' | 'month';
     // Guest permissions
     guestsCanModify?: boolean;
     guestsCanInviteOthers?: boolean;

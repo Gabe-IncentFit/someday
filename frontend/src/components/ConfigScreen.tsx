@@ -203,6 +203,16 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                 alert("All event types must have a slug/id.");
                 return;
             }
+            if (et.maxBookings !== undefined) {
+                if (!Number.isInteger(et.maxBookings) || et.maxBookings < 1) {
+                    alert(`Max bookings for ${et.name} must be a positive whole number.`);
+                    return;
+                }
+                if (!['day', 'week', 'month'].includes(et.maxBookingsPeriod ?? '')) {
+                    alert(`Please select a period (day, week, or month) for the ${et.name} booking limit.`);
+                    return;
+                }
+            }
         }
 
         setSaving(true);
@@ -796,6 +806,60 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                             >
                                                                 {day.label}
                                                             </DropdownMenuCheckboxItem>
+                                                        ))}
+                                                    </DropdownMenuContent>
+                                                </DropdownMenu>
+                                            </div>
+                                        </div>
+
+                                        {/* Max Bookings Limit */}
+                                        <div className="space-y-2">
+                                            <div className="space-y-1">
+                                                <div className="flex justify-between items-center">
+                                                    <Label className="text-sm font-medium">Max Bookings</Label>
+                                                    {et.maxBookings && (
+                                                        <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(index, { maxBookings: undefined, maxBookingsPeriod: undefined })}>
+                                                            Remove Limit
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                                <p className="text-xs text-muted-foreground">
+                                                    Cap how many times this event type can be booked per period.
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <Input
+                                                    type="number"
+                                                    min={1}
+                                                    className="w-28"
+                                                    placeholder="No limit"
+                                                    value={et.maxBookings || ""}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value) || undefined;
+                                                        updateEventType(index, {
+                                                            maxBookings: val,
+                                                            // Default the period to "week" when a limit is first entered.
+                                                            maxBookingsPeriod: val ? (et.maxBookingsPeriod ?? 'week') : undefined,
+                                                        });
+                                                    }}
+                                                />
+                                                <span className="text-muted-foreground text-xs">per</span>
+                                                <DropdownMenu>
+                                                    <DropdownMenuTrigger asChild disabled={!et.maxBookings}>
+                                                        <Button variant="outline" className="justify-between font-normal min-w-[110px]" disabled={!et.maxBookings}>
+                                                            <span className="capitalize">{et.maxBookingsPeriod ?? 'week'}</span>
+                                                            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                                        </Button>
+                                                    </DropdownMenuTrigger>
+                                                    <DropdownMenuContent>
+                                                        {(['day', 'week', 'month'] as const).map((p) => (
+                                                            <DropdownMenuItem
+                                                                key={p}
+                                                                className="capitalize"
+                                                                onClick={() => updateEventType(index, { maxBookingsPeriod: p })}
+                                                            >
+                                                                {p}
+                                                            </DropdownMenuItem>
                                                         ))}
                                                     </DropdownMenuContent>
                                                 </DropdownMenu>

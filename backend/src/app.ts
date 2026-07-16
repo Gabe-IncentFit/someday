@@ -11,6 +11,10 @@ interface EventType {
   DAYS_IN_ADVANCE?: number;
   CALENDARS?: string[];
   schedulingStrategy?: 'collective' | 'round_robin';
+  // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
+  // and maxBookingsPeriod is set. Applies to the whole event type (aggregate).
+  maxBookings?: number;
+  maxBookingsPeriod?: 'day' | 'week' | 'month';
   // Guest permissions
   guestsCanModify?: boolean;
   guestsCanInviteOthers?: boolean;
@@ -118,6 +122,74 @@ function doGet(): GoogleAppsScript.HTML.HtmlOutput {
     .addMetaTag("viewport", "width=device-width, initial-scale=1");
 }
 
+// Returns true when the event type has an active max-bookings limit.
+function hasBookingLimit(eventType: EventType): boolean {
+  return typeof eventType.maxBookings === 'number'
+    && eventType.maxBookings > 0
+    && (eventType.maxBookingsPeriod === 'day'
+      || eventType.maxBookingsPeriod === 'week'
+      || eventType.maxBookingsPeriod === 'month');
+}
+
+// Bucket key for a date within the configured time zone. Bookings sharing a key
+// fall in the same limit period. Weeks start on Sunday.
+function periodKey(date: Date, period: 'day' | 'week' | 'month', tz: string): string {
+  if (period === 'month') {
+    return Utilities.formatDate(date, tz, "yyyy-MM");
+  }
+  if (period === 'day') {
+    return Utilities.formatDate(date, tz, "yyyy-MM-dd");
+  }
+  // week: key by the date of the preceding Sunday (in tz). Do the subtraction as
+  // whole-day calendar arithmetic in UTC — subtracting raw milliseconds off the
+  // original timestamp and re-formatting in tz can land on the wrong day across
+  // a DST transition within the week.
+  const dow = parseInt(Utilities.formatDate(date, tz, "u"), 10) % 7; // u: 1=Mon..7=Sun -> 0=Sun
+  const [y, m, d] = Utilities.formatDate(date, tz, "yyyy-MM-dd").split("-").map(Number);
+  const weekStart = new Date(Date.UTC(y, m - 1, d));
+  weekStart.setUTCDate(weekStart.getUTCDate() - dow);
+  return Utilities.formatDate(weekStart, "UTC", "yyyy-MM-dd");
+}
+
+// Counts existing bookings of an event type per period bucket across the given
+// calendars. Each booking is tagged (private extended property) on exactly one
+// calendar (organizer/target copy), so summing across calendars does not double
+// count and yields the aggregate for the whole event type.
+function countBookingsByPeriod(
+  calendarIds: string[],
+  eventTypeId: string,
+  timeMin: Date,
+  timeMax: Date,
+  period: 'day' | 'week' | 'month',
+  tz: string
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  calendarIds.forEach((calId) => {
+    let pageToken: string | undefined = undefined;
+    do {
+      const resp: any = Calendar.Events!.list(calId, {
+        privateExtendedProperty: 'somedayEventTypeId=' + eventTypeId,
+        timeMin: timeMin.toISOString(),
+        timeMax: timeMax.toISOString(),
+        singleEvents: true,
+        showDeleted: false,
+        maxResults: 2500,
+        pageToken,
+      });
+      (resp.items || []).forEach((ev: any) => {
+        // Don't let cancelled bookings consume limit slots.
+        if (ev.status === 'cancelled') return;
+        const startStr = ev.start && (ev.start.dateTime || ev.start.date);
+        if (!startStr) return;
+        const key = periodKey(new Date(startStr), period, tz);
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      pageToken = resp.nextPageToken;
+    } while (pageToken);
+  });
+  return counts;
+}
+
 function fetchAvailability(eventTypeId?: string): {
   timeslots: string[];
   durationMinutes: number;
@@ -160,6 +232,22 @@ function fetchAvailability(eventTypeId?: string): {
     }));
   });
 
+  // If a max-bookings limit is active, count existing bookings once over the
+  // whole window, bucketed by period, so maxed-out periods can be hidden.
+  // The lower bound reaches ~40 days before now so the *current* period (which
+  // usually started before now for week/month) is fully counted — otherwise it
+  // would be undercounted and slots shown that bookTimeslot then rejects.
+  // Note: the upper bound is only `end` (now + daysInAdvance), not padded, so a
+  // period straddling the end of the display window could be undercounted here
+  // relative to bookTimeslot's ±40d check. That can only happen if bookings
+  // exist beyond the scheduling window; the authoritative check in bookTimeslot
+  // still prevents overbooking, so the worst case is a slot shown then rejected.
+  const limitActive = hasBookingLimit(eventType);
+  const countFrom = new Date(now.getTime() - 40 * 24 * 60 * 60 * 1000);
+  const bookingCounts = limitActive
+    ? countBookingsByPeriod(calendarsToQuery, eventType.id, countFrom, end, eventType.maxBookingsPeriod!, timeZone)
+    : {};
+
   //get all timeslots between now and end date
   const timeslots = [];
   const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
@@ -186,9 +274,15 @@ function fetchAvailability(eventTypeId?: string): {
       ? freeCalendarsCount > 0
       : freeCalendarsCount === calendarsToQuery.length;
 
-    if (isAvailable) {
-      timeslots.push(start.toISOString());
+    if (!isAvailable) continue;
+
+    // Skip slots whose period has already reached the booking limit.
+    if (limitActive) {
+      const key = periodKey(start, eventType.maxBookingsPeriod!, timeZone);
+      if ((bookingCounts[key] || 0) >= eventType.maxBookings!) continue;
     }
+
+    timeslots.push(start.toISOString());
   }
   return { timeslots, durationMinutes };
 }
@@ -204,13 +298,51 @@ function bookTimeslot(
   const eventType = CONFIG.EVENT_TYPES.find((et: EventType) => et.id === eventTypeId) || CONFIG.EVENT_TYPES[0];
   const durationMinutes = eventType.duration;
   const calendarsToUse = eventType.CALENDARS ?? CONFIG.CALENDARS;
-  const calendarId = calendarsToUse[0];
   const startTime = new Date(timeslot);
   if (isNaN(startTime.getTime())) {
     throw new Error("Invalid start time");
   }
   const endTime = new Date(startTime.getTime());
   endTime.setUTCMinutes(startTime.getUTCMinutes() + durationMinutes);
+
+  // Authoritative max-bookings check. Hold a script lock across the count-check
+  // AND the event creation below so two concurrent bookings for the last slot in
+  // a period can't both pass the check and both create events. Count over a
+  // window that comfortably covers the slot's period, then look up the slot's
+  // own period bucket.
+  let bookingLock: GoogleAppsScript.Lock.Lock | null = null;
+  if (hasBookingLimit(eventType)) {
+    bookingLock = LockService.getScriptLock();
+    try {
+      bookingLock.waitLock(15000);
+    } catch (e) {
+      throw new Error("Server is busy, please try again");
+    }
+    // Release the lock on any failure within the pre-check itself (including the
+    // count query throwing), then rethrow unchanged. On the happy path the lock
+    // stays held through event creation, where the finally block releases it.
+    try {
+      const tz = CONFIG.TIME_ZONE;
+      const period = eventType.maxBookingsPeriod!;
+      const padMs = 40 * 24 * 60 * 60 * 1000;
+      const counts = countBookingsByPeriod(
+        calendarsToUse,
+        eventType.id,
+        new Date(startTime.getTime() - padMs),
+        new Date(startTime.getTime() + padMs),
+        period,
+        tz
+      );
+      const key = periodKey(startTime, period, tz);
+      if ((counts[key] || 0) >= eventType.maxBookings!) {
+        throw new Error("Booking limit reached for this period");
+      }
+    } catch (e) {
+      bookingLock.releaseLock();
+      bookingLock = null;
+      throw e;
+    }
+  }
 
   try {
     const possibleEvents = Calendar.Freebusy!.query({
@@ -247,33 +379,47 @@ function bookTimeslot(
       guestsToInvite = [...guestsToInvite, ...teamGuests];
     }
 
-    const event = CalendarApp.getCalendarById(targetCalendarId).createEvent(
-      `Appointment with ${name}`,
-      startTime,
-      endTime,
-      {
-        description: `Phone: ${phone}\nNote: ${note}`,
-        guests: guestsToInvite.join(','),
-        sendInvites: true,
-        status: "confirmed",
-      }
-    );
-
-    // Apply guest permissions (defaults: modify=false, invite=false, see=true)
-    event.setGuestsCanModify(eventType.guestsCanModify ?? false);
-    event.setGuestsCanInviteOthers(eventType.guestsCanInviteOthers ?? false);
-    event.setGuestsCanSeeGuests(eventType.guestsCanSeeOtherGuests ?? true);
-
-    // Apply visibility setting
+    // Create the event atomically with its event-type tag, using the advanced
+    // Calendar API (Events.insert) rather than CalendarApp.createEvent followed
+    // by a separate patch. A two-step create-then-tag can fail *after* the event
+    // exists and invites have been sent, which would both report a real booking
+    // as failed AND leave it untagged — invisible to countBookingsByPeriod, so
+    // the limit would permanently under-count and a retry would duplicate the
+    // booking. One insert makes it a single atomic operation and also gives us
+    // the real event id directly (no fragile iCalUID suffix stripping).
+    //
+    // somedayEventTypeId is a *private* extended property (countBookingsByPeriod
+    // filters on privateExtendedProperty). Private properties live only on the
+    // organizer/target copy and don't propagate to guest calendars, which keeps
+    // that function's single-copy assumption valid so summing across calendars
+    // never double counts. sendUpdates: 'all' preserves the prior sendInvites.
+    const resource: any = {
+      summary: `Appointment with ${name}`,
+      description: `Phone: ${phone}\nNote: ${note}`,
+      start: { dateTime: startTime.toISOString() },
+      end: { dateTime: endTime.toISOString() },
+      status: "confirmed",
+      attendees: guestsToInvite.map((guestEmail: string) => ({ email: guestEmail })),
+      // Guest permissions (defaults: modify=false, invite=false, see=true)
+      guestsCanModify: eventType.guestsCanModify ?? false,
+      guestsCanInviteOthers: eventType.guestsCanInviteOthers ?? false,
+      guestsCanSeeOtherGuests: eventType.guestsCanSeeOtherGuests ?? true,
+      extendedProperties: { private: { somedayEventTypeId: eventType.id } },
+    };
+    // Visibility ('default' needs no explicit value)
     if (eventType.visibility === 'public') {
-      event.setVisibility(CalendarApp.Visibility.PUBLIC);
+      resource.visibility = 'public';
     } else if (eventType.visibility === 'private') {
-      event.setVisibility(CalendarApp.Visibility.PRIVATE);
+      resource.visibility = 'private';
     }
-    // 'default' visibility doesn't require explicit setting
+
+    Calendar.Events!.insert(resource, targetCalendarId, { sendUpdates: 'all' });
+
     return `Timeslot booked successfully`;
   } catch (e) {
     const error = e as Error;
     throw new Error(`Failed to create event: ${error.message}`);
+  } finally {
+    if (bookingLock) bookingLock.releaseLock();
   }
 }

@@ -35,6 +35,7 @@ import {
 import { Switch } from "./ui/switch";
 import { GoogleLib } from "@/lib/googlelib";
 import { CalendarMultiSelect } from "./CalendarMultiSelect";
+import { CalendarSingleSelect } from "./CalendarSingleSelect";
 
 import { Config, EventType } from "@/models/EventType";
 
@@ -564,6 +565,47 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                     )}
                 </div>
 
+                {/* Host Calendar (organizer) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-2">
+                    <div className="space-y-3">
+                        <div className="space-y-1">
+                            <Label className="text-sm font-medium">Host Calendar</Label>
+                            <p className="text-xs text-muted-foreground">
+                                The calendar the event is created on (its owner is the organizer).
+                                Leave as "No fixed host" to let the scheduling strategy decide.
+                            </p>
+                        </div>
+                        <CalendarSingleSelect
+                            value={config.hostCalendar ?? ""}
+                            available={availableCalendars}
+                            placeholder="No fixed host (use strategy)"
+                            noneLabel="No fixed host (use strategy)"
+                            onChange={(val) => setConfig({ ...config, hostCalendar: val })}
+                        />
+                    </div>
+
+                    {/* Only relevant once a fixed host is chosen. */}
+                    {(config.hostCalendar ?? "") !== "" && (
+                        <div className="space-y-3">
+                            <div className="space-y-1">
+                                <Label className="text-sm font-medium">Invite Monitored Calendars</Label>
+                                <p className="text-xs text-muted-foreground">
+                                    Add the monitored calendars as attendees, or use them only to check for conflicts.
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-3 pt-1">
+                                <Switch
+                                    checked={config.inviteAvailabilityCalendars ?? false}
+                                    onCheckedChange={(checked) => setConfig({ ...config, inviteAvailabilityCalendars: checked })}
+                                />
+                                <span className="text-sm text-muted-foreground">
+                                    {config.inviteAvailabilityCalendars ? "Invited as attendees" : "Conflict-check only"}
+                                </span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
                 {/* Event Types */}
                 <div className="space-y-4 pt-4 border-t">
                     <div className="flex justify-between items-center">
@@ -1065,6 +1107,46 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     </DropdownMenu>
                                                 </div>
                                             )}
+
+                                            {/* Host Calendar Override */}
+                                            <div className="space-y-2">
+                                                <div className="flex justify-between items-center">
+                                                    <Label className="text-sm font-medium">Host Calendar</Label>
+                                                    {et.hostCalendar !== undefined && (
+                                                        <Button
+                                                            variant="link"
+                                                            size="sm"
+                                                            className="h-auto p-0 text-destructive"
+                                                            onClick={() => updateEventType(index, { hostCalendar: undefined })}
+                                                        >
+                                                            Reset to Global
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                                <p className="text-xs text-muted-foreground">
+                                                    Override which calendar the event is created on.
+                                                </p>
+                                                <CalendarSingleSelect
+                                                    value={et.hostCalendar ?? config.hostCalendar ?? ""}
+                                                    available={availableCalendars}
+                                                    placeholder={et.hostCalendar === undefined ? "Using global settings" : "No fixed host (use strategy)"}
+                                                    noneLabel="No fixed host (use strategy)"
+                                                    onChange={(val) => updateEventType(index, { hostCalendar: val })}
+                                                />
+                                                {(et.hostCalendar ?? config.hostCalendar ?? "") !== "" && (
+                                                    <div className="flex items-center gap-3 pt-1">
+                                                        <Switch
+                                                            checked={et.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false}
+                                                            onCheckedChange={(checked) => updateEventType(index, { inviteAvailabilityCalendars: checked })}
+                                                        />
+                                                        <span className="text-xs text-muted-foreground">
+                                                            {(et.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false)
+                                                                ? "Monitored calendars invited as attendees"
+                                                                : "Monitored calendars checked for conflicts only"}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
 
                                     </div>

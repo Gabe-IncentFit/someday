@@ -13,6 +13,16 @@ interface EventType {
   MAX_DAYS_IN_ADVANCE?: number;
   MIN_DAYS_IN_ADVANCE?: number;
   CALENDARS?: string[];
+  // Fixed host calendar (the event's organizer). When set, the event is always
+  // created on this calendar regardless of schedulingStrategy, and CALENDARS is
+  // purely the availability/conflict-check set. Empty/undefined = no fixed host:
+  // derive it from the strategy (collective → first calendar, round-robin → a
+  // free one), the original behavior. May differ from the CALENDARS it checks.
+  hostCalendar?: string;
+  // Only meaningful with a fixed hostCalendar: also invite the availability
+  // (CALENDARS) calendars as attendees (true) or use them for conflict checks
+  // only (false, default).
+  inviteAvailabilityCalendars?: boolean;
   schedulingStrategy?: 'collective' | 'round_robin';
   // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
   // and maxBookingsPeriod is set. Applies to the whole event type (aggregate).
@@ -55,7 +65,14 @@ const CONFIG = {
       return ["primary"];
     }
   })(),
-  schedulingStrategy: (props.getProperty('schedulingStrategy') || 'collective') as 'collective' | 'round_robin'
+  schedulingStrategy: (props.getProperty('schedulingStrategy') || 'collective') as 'collective' | 'round_robin',
+  // Fixed host calendar (organizer). '' = no fixed host; the host is then derived
+  // from schedulingStrategy as before. Distinct from CALENDARS, which is only the
+  // availability/conflict-check set.
+  hostCalendar: props.getProperty('hostCalendar') || '',
+  // When a fixed host is set, whether the other availability calendars are also
+  // invited as attendees (true) or only checked for conflicts (false).
+  inviteAvailabilityCalendars: props.getProperty('inviteAvailabilityCalendars') === 'true'
 };
 
 function isOwner(): boolean {
@@ -96,6 +113,8 @@ function getConfig() {
     EVENT_TYPES: CONFIG.EVENT_TYPES,
     CALENDARS: CONFIG.CALENDARS,
     schedulingStrategy: CONFIG.schedulingStrategy,
+    hostCalendar: CONFIG.hostCalendar,
+    inviteAvailabilityCalendars: CONFIG.inviteAvailabilityCalendars,
   };
 
   if (!isOwner()) {
@@ -130,6 +149,9 @@ function setConfig(newConfig: Partial<typeof CONFIG>) {
   if (newConfig.EVENT_TYPES) props.setProperty('EVENT_TYPES', JSON.stringify(newConfig.EVENT_TYPES));
   if (newConfig.CALENDARS) props.setProperty('CALENDARS', JSON.stringify(newConfig.CALENDARS));
   if (newConfig.schedulingStrategy) props.setProperty('schedulingStrategy', newConfig.schedulingStrategy);
+  // Allow '' (clears the fixed host), so guard on !== undefined rather than truthiness.
+  if (newConfig.hostCalendar !== undefined) props.setProperty('hostCalendar', newConfig.hostCalendar);
+  if (newConfig.inviteAvailabilityCalendars !== undefined) props.setProperty('inviteAvailabilityCalendars', String(newConfig.inviteAvailabilityCalendars));
 
   return { success: true };
 }
@@ -330,6 +352,38 @@ function freebusyIntervals(
   }));
 }
 
+// Resolve an event type's calendar settings into the three roles the booking
+// flow needs, which the single CALENDARS list used to conflate:
+//   availability — whose free/busy gates whether a slot is offered/bookable.
+//   host — the one calendar the event is created on; its owner is the organizer.
+//     '' means "no fixed host": the host is derived from the scheduling strategy
+//     (collective → first calendar, round-robin → a free one), the original
+//     behavior. A fixed host may live outside `availability`.
+//   conflict — availability plus the host. The host must never be double-booked,
+//     and only the host/organizer copy carries the somedayEventTypeId tag that
+//     countBookingsByPeriod sums, so the host is always part of the freebusy and
+//     count set even when it isn't one of the availability calendars.
+// requireAllFree folds in the availability rule: a fixed host forces collective
+// semantics (every conflict calendar must be free) because the host is fixed, not
+// chosen; round-robin (any one free) only applies when there is no fixed host.
+function resolveCalendarPolicy(eventType: EventType) {
+  const availability = eventType.CALENDARS ?? CONFIG.CALENDARS;
+  const host = eventType.hostCalendar ?? CONFIG.hostCalendar ?? '';
+  const conflict = host && availability.indexOf(host) < 0
+    ? [...availability, host]
+    : availability;
+  const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
+  const inviteAvailability = eventType.inviteAvailabilityCalendars ?? CONFIG.inviteAvailabilityCalendars ?? false;
+  return {
+    availability,
+    host,
+    conflict,
+    strategy,
+    inviteAvailability,
+    requireAllFree: host ? true : strategy !== 'round_robin',
+  };
+}
+
 function fetchAvailability(eventTypeId?: string): {
   timeslots: string[];
   durationMinutes: number;
@@ -343,7 +397,11 @@ function fetchAvailability(eventTypeId?: string): {
   const timeZone = CONFIG.TIME_ZONE;
   const daysInAdvance = eventType.MAX_DAYS_IN_ADVANCE ?? CONFIG.MAX_DAYS_IN_ADVANCE;
   const minDaysInAdvance = eventType.MIN_DAYS_IN_ADVANCE ?? CONFIG.MIN_DAYS_IN_ADVANCE ?? 0;
-  const calendarsToQuery = eventType.CALENDARS ?? CONFIG.CALENDARS;
+  // Query (and count over) the full conflict set — the availability calendars
+  // plus any fixed host — so a fixed host outside CALENDARS is still checked and
+  // its tagged bookings are counted. See resolveCalendarPolicy.
+  const policy = resolveCalendarPolicy(eventType);
+  const calendarsToQuery = policy.conflict;
 
   const now = new Date();
   // End of the booking window: local midnight `daysInAdvance` days out, in the
@@ -392,7 +450,6 @@ function fetchAvailability(eventTypeId?: string): {
 
   //get all timeslots between now and end date
   const timeslots = [];
-  const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
   const workHours = eventType.WORKHOURS ?? CONFIG.WORKHOURS;
 
   // Generate slots one local day at a time, anchoring each day's grid to
@@ -429,9 +486,9 @@ function fetchAvailability(eventTypeId?: string): {
         return !intervals.some((event) => event.start < endTime && event.end > start);
       }).length;
 
-      const isAvailable = strategy === 'round_robin'
-        ? freeCalendarsCount > 0
-        : freeCalendarsCount === calendarsToQuery.length;
+      const isAvailable = policy.requireAllFree
+        ? freeCalendarsCount === calendarsToQuery.length
+        : freeCalendarsCount > 0;
 
       if (!isAvailable) continue;
 
@@ -483,7 +540,7 @@ function bookTimeslot(
 ): string {
   const eventType = CONFIG.EVENT_TYPES.find((et: EventType) => et.id === eventTypeId) || CONFIG.EVENT_TYPES[0];
   const durationMinutes = eventType.duration;
-  const calendarsToUse = eventType.CALENDARS ?? CONFIG.CALENDARS;
+  const policy = resolveCalendarPolicy(eventType);
   const startTime = new Date(timeslot);
   if (isNaN(startTime.getTime())) {
     throw new Error("Invalid start time");
@@ -534,7 +591,7 @@ function bookTimeslot(
       const period = eventType.maxBookingsPeriod!;
       const padMs = periodPaddingMs(period);
       const counts = countBookingsByPeriod(
-        calendarsToUse,
+        policy.conflict,
         eventType.id,
         new Date(startTime.getTime() - padMs),
         new Date(startTime.getTime() + padMs),
@@ -551,26 +608,42 @@ function bookTimeslot(
     }
   }
 
-  // Chosen inside the try (round-robin picks a free calendar; collective uses
-  // the first), but declared out here so the catch can name it in access errors.
-  let targetCalendarId = calendarsToUse[0];
+  // Chosen inside the try (a fixed host wins; otherwise round-robin picks a free
+  // calendar and collective uses the first), but declared out here so the catch
+  // can name it in access errors.
+  let targetCalendarId = policy.host || policy.conflict[0];
   try {
     const possibleEvents = Calendar.Freebusy!.query({
       timeMin: startTime.toISOString(),
       timeMax: endTime.toISOString(),
-      items: calendarsToUse.map((id: string) => ({ id })),
+      items: policy.conflict.map((id: string) => ({ id })),
     });
 
-    const freeCalendars = calendarsToUse.filter((calId: string) => {
+    const freeCalendars = policy.conflict.filter((calId: string) => {
       const intervals = freebusyIntervals(possibleEvents, calId);
       // null = errored/inaccessible calendar; not free (fail closed).
       return intervals !== null && intervals.length === 0;
     });
 
-    const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
     let guestsToInvite = [email];
 
-    if (strategy === 'round_robin') {
+    if (policy.host) {
+      // Fixed host wins over the scheduling strategy: the event always lands on
+      // the configured host, and CALENDARS is purely the availability set.
+      // Availability is collective over the whole conflict set (host + CALENDARS),
+      // matching fetchAvailability (resolveCalendarPolicy sets requireAllFree).
+      if (freeCalendars.length !== policy.conflict.length) {
+        throw new Error("Timeslot not available");
+      }
+      targetCalendarId = policy.host;
+      // The host is the organizer. The other availability calendars are invited
+      // as attendees only when opted in; otherwise they gate availability but
+      // stay off the invite (conflict-check only).
+      if (policy.inviteAvailability) {
+        const teamGuests = policy.availability.filter((id: string) => id !== policy.host);
+        guestsToInvite = [...guestsToInvite, ...teamGuests];
+      }
+    } else if (policy.strategy === 'round_robin') {
       if (freeCalendars.length === 0) {
         throw new Error("Timeslot not available");
       }
@@ -580,13 +653,13 @@ function bookTimeslot(
       // guestsToInvite remains [email]
     } else {
       // Collective: Check if ALL are free
-      if (freeCalendars.length !== calendarsToUse.length) {
+      if (freeCalendars.length !== policy.conflict.length) {
         throw new Error("Timeslot not available");
       }
       // Default to first calendar
-      targetCalendarId = calendarsToUse[0];
+      targetCalendarId = policy.conflict[0];
       // Collective: Invite all other calendars so everyone is blocked/attending
-      const teamGuests = calendarsToUse.filter((id: string) => id !== targetCalendarId);
+      const teamGuests = policy.conflict.filter((id: string) => id !== targetCalendarId);
       guestsToInvite = [...guestsToInvite, ...teamGuests];
     }
 

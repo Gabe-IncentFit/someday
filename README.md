@@ -23,6 +23,7 @@ Someday is a simple, open-source scheduling tool designed specifically for Gmail
 - **Multiple Event Types**: Create diverse meeting options like "Quick Chat" or "Deep Dive" with unique durations and availability settings.
 - **Team Scheduling**: Add multiple calendars including teammates' calendars (with read access) for collaborative scheduling.
 - **Flexible Scheduling Strategies**: Choose between "Collective" (all team members must be free) or "Round-Robin" (distribute bookings among available team members) scheduling modes.
+- **Dedicated Host Calendar**: Optionally pin every booking to a single host calendar (the organizer), separate from the calendars checked for conflicts — e.g. check a whole team's availability but always create the event on a shared or executive calendar. Choose whether the checked calendars are also invited or used for conflict checks only.
 - **Guest Permission Controls**: Fine-grained control over what guests can do with booked events (modify, invite others, see attendees) and calendar visibility (public, private, or default).
 - **Booking Limits**: Cap how many times a specific event type can be booked per day, week, month, quarter, or year. Maxed-out periods are hidden from the picker and enforced at booking time.
 - **Dynamic Configuration**: Adjust your timezone, working hours, available days, and monitored calendars globally or per event type directly through the integrated Settings screen.
@@ -54,6 +55,7 @@ Someday includes a built-in **Settings** screen for easy configuration.
    - **Scheduling Strategy** (when multiple calendars selected):
      - **Collective**: All selected team members must be free for a timeslot to be available. All team members are invited to the booked event.
      - **Round-Robin**: Bookings are distributed among available team members. Only the assigned team member and the guest receive calendar invites.
+   - **Host Calendar**: Pin the calendar every booking is created on (its owner becomes the meeting organizer), independently of the Monitored Calendars used for conflict checks. This calendar is always checked for conflicts too, even if it isn't in the monitored list. Leave it as "No fixed host" to keep the original behavior, where the strategy picks the host (Collective uses the first monitored calendar; Round-Robin the assigned one). When a host is set, availability is Collective (the host and all monitored calendars must be free), and an **Invite Monitored Calendars** toggle controls whether those calendars are added as attendees or used only to check for conflicts.
 
    **Event Types**:
    - **Custom Meeting Types**: Create unlimited event types (e.g. "15 Min Discovery", "1 Hour Review").
@@ -67,7 +69,7 @@ Someday includes a built-in **Settings** screen for easy configuration.
      - **Public**: Event details are publicly visible to everyone
      - **Private**: Shows only as "Busy" without revealing event details
    - **Max Bookings**: Limit how many times an event type can be booked within a rolling period. Enter a number and choose **day**, **week**, **month**, **quarter**, or **year** (weeks start on Sunday; quarters and years are calendar-based, all in your configured time zone). Leave it blank for no limit (the default). The limit applies to the event type as a whole — across all monitored calendars for Round-Robin. Once a period reaches its cap, its slots disappear from the booking page and a final server-side check rejects any attempt to exceed it. Note: the cap counts every booking of this event type within the period — including ones made before you enabled the limit (bookings are always tagged) — so turning it on takes effect immediately against the current period.
-   - **Smart Overrides**: Override global Work Hours, Available Days, Scheduling Window, Minimum Notice, Monitored Calendars, and Scheduling Strategy for specific event types.
+   - **Smart Overrides**: Override global Work Hours, Available Days, Scheduling Window, Minimum Notice, Monitored Calendars, Host Calendar, and Scheduling Strategy for specific event types.
    - **Per-Event Strategies**: Set different scheduling strategies for different event types (e.g., Round-Robin for sales calls, Collective for team meetings).
    - **Direct Links**: Copy a unique booking URL for any event type to share directly.
    - **Visibility Controls**: Toggle which event types are displayed on your main public scheduling page.
@@ -150,11 +152,12 @@ __you may need to sign out of all accounts, and only into your target account__
    - By default, the script uses your primary calendar.
    - You can add multiple calendars directly through the **Settings** screen in the UI by selecting from your owned calendars or entering any calendar email address (e.g., teammate@company.com).
    - **Conflict-checking** needs only read access to the calendars you monitor.
-   - **Booking writes the event to a _target_ calendar**, which needs write ("Make changes to events") access: for **Round-Robin** that is the assigned teammate's calendar (so every calendar in the rotation must be writable), and for **Collective** it is the first calendar in the list. A read-only target makes booking fail with an explanatory error.
+   - **Booking writes the event to a _target_ calendar**, which needs write ("Make changes to events") access. When a **Host Calendar** is set, that is always the target; otherwise it depends on the strategy — for **Round-Robin** that is the assigned teammate's calendar (so every calendar in the rotation must be writable), and for **Collective** it is the first calendar in the list. A read-only target makes booking fail with an explanatory error.
 
 ## Cheat Sheet
 
-- `npm run deploy` - build and deploy
+- `npm run deploy` - build and deploy to production URL
+- `npm run test-push` - build and push to /dev URL (no version bump)
 - `npm run build` - build only
 
 - `undeployall.sh` - undeploy all versions of the script

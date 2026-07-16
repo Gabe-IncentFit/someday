@@ -91,6 +91,52 @@ function TimeDropdown({ value, onChange, placeholder }: { value?: number; onChan
     );
 }
 
+// A number input that doesn't fight you mid-edit. Clamping on every keystroke
+// silently mangles input: with a NaN fallback re-filling the box, clearing "28"
+// and typing "45" goes ""->1->"14"->"145", and the clamp freezes that at the
+// max (90). Keep the raw text in local state while editing and only clamp on
+// blur; the field is free to be empty in between. Save-time validation still
+// has the final say.
+function ClampedNumberInput({
+    value,
+    min,
+    max,
+    fallback,
+    onCommit,
+    ...rest
+}: {
+    value: number | undefined;
+    min: number;
+    max: number;
+    // Value to commit when the field is left empty/invalid; undefined clears it.
+    fallback: number | undefined;
+    onCommit: (val: number | undefined) => void;
+} & Omit<React.ComponentProps<typeof Input>, "value" | "onChange" | "onBlur" | "min" | "max" | "type">) {
+    const [draft, setDraft] = useState<string | null>(null);
+
+    return (
+        <Input
+            type="number"
+            min={min}
+            max={max}
+            value={draft ?? (value === undefined ? "" : String(value))}
+            onChange={(e) => {
+                setDraft(e.target.value);
+                // Propagate unclamped so a transient overshoot isn't frozen at
+                // the cap; blur does the clamping.
+                const parsed = parseInt(e.target.value, 10);
+                onCommit(isNaN(parsed) ? undefined : parsed);
+            }}
+            onBlur={() => {
+                const parsed = parseInt(draft ?? "", 10);
+                onCommit(isNaN(parsed) ? fallback : Math.min(max, Math.max(min, parsed)));
+                setDraft(null);
+            }}
+            {...rest}
+        />
+    );
+}
+
 export function ConfigScreen({ onBack }: { onBack: () => void }) {
     const [config, setConfig] = useState<Config | null>(null);
     const [availableCalendars, setAvailableCalendars] = useState<CalendarInfo[]>([]);
@@ -425,21 +471,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                         </div>
                         <div className="flex items-center gap-4 relative">
                             {/* High number of days can make the system slow as it fetches availability for each day */}
-                            <Input
+                            <ClampedNumberInput
                                 id="daysInAdvance"
-                                type="number"
-                                min="1"
-                                max="90"
+                                min={1}
+                                max={90}
+                                fallback={1}
                                 className="w-full pr-12"
                                 value={config.MAX_DAYS_IN_ADVANCE}
-                                onChange={(e) => {
-                                    const val = parseInt(e.target.value, 10);
-                                    if (!isNaN(val)) {
-                                        setConfig({ ...config, MAX_DAYS_IN_ADVANCE: Math.min(90, Math.max(1, val)) });
-                                    } else {
-                                        setConfig({ ...config, MAX_DAYS_IN_ADVANCE: 1 });
-                                    }
-                                }}
+                                onCommit={(val) => setConfig({ ...config, MAX_DAYS_IN_ADVANCE: val ?? 1 })}
                             />
                             <span className="absolute right-3 text-sm text-muted-foreground pointer-events-none">days</span>
                         </div>
@@ -659,17 +698,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </p>
                                         </div>
                                         <div className="relative">
-                                            <Input
+                                            <ClampedNumberInput
                                                 id={`duration-${index}`}
-                                                type="number"
-                                                min="1"
-                                                max="1440"
+                                                min={1}
+                                                max={1440}
+                                                fallback={1}
                                                 className="pr-20"
                                                 value={et.duration}
-                                                onChange={(e) => {
-                                                    const val = parseInt(e.target.value) || 1;
-                                                    updateEventType(index, { duration: Math.min(1440, Math.max(1, val)) });
-                                                }}
+                                                onCommit={(val) => updateEventType(index, { duration: val ?? 1 })}
                                             />
                                             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">minutes</span>
                                         </div>

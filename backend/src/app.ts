@@ -235,6 +235,44 @@ function tzMidnightPlusDays(from: Date, tz: string, days: number): Date {
   return new Date(wallAsUTC.getTime() - offsetMin * 60000);
 }
 
+// Per-slot window checks shared by fetchAvailability (which builds the grid) and
+// bookTimeslot (which re-validates an incoming slot). Covers grid alignment,
+// past-time, max-days-in-advance, work hours, and work days — every per-slot
+// filter that does not depend on calendar freebusy or the max-bookings count.
+// Keeping this in one place means the anonymously-callable bookTimeslot cannot
+// drift out of sync with what the availability builder allows. `now` is the
+// reference instant both callers pass so their notions of "now"/window end match.
+function isSlotWithinWindow(startTime: Date, eventType: EventType, now: Date): boolean {
+  const timeZone = CONFIG.TIME_ZONE;
+  const workDays = eventType.WORKDAYS ?? CONFIG.WORKDAYS;
+  const workHours = eventType.WORKHOURS ?? CONFIG.WORKHOURS;
+  const daysInAdvance = eventType.MAX_DAYS_IN_ADVANCE ?? CONFIG.MAX_DAYS_IN_ADVANCE;
+  const durationMs = eventType.duration * 60000;
+  const t = startTime.getTime();
+
+  // Grid alignment: valid slots sit on the epoch-aligned duration grid.
+  if (t % durationMs !== 0) return false;
+  // Past-time: not before the current (floored) grid slot.
+  const nearest = Math.floor(now.getTime() / durationMs) * durationMs;
+  if (t < nearest) return false;
+  // Max days in advance: the whole slot must end on/before the window end,
+  // computed the same way as fetchAvailability's `end`.
+  const windowEnd = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + daysInAdvance
+  );
+  if (t + durationMs > windowEnd) return false;
+  // Work hours / work days in the configured time zone.
+  const startTZ = new Date(
+    Utilities.formatDate(startTime, timeZone, "yyyy-MM-dd'T'HH:mm:ss")
+  );
+  if (startTZ.getHours() < workHours.start) return false;
+  if (startTZ.getHours() >= workHours.end) return false;
+  if (workDays.indexOf(startTZ.getDay()) < 0) return false;
+  return true;
+}
+
 function fetchAvailability(eventTypeId?: string): {
   timeslots: string[];
   durationMinutes: number;
@@ -243,10 +281,9 @@ function fetchAvailability(eventTypeId?: string): {
   const durationMinutes = eventType.duration;
   const durationMs = durationMinutes * 60000;
 
-  // Use event-specific overrides or fall back to global CONFIG
+  // Use event-specific overrides or fall back to global CONFIG. Work hours and
+  // work days are read inside isSlotWithinWindow, the shared per-slot filter.
   const timeZone = CONFIG.TIME_ZONE;
-  const workDays = eventType.WORKDAYS ?? CONFIG.WORKDAYS;
-  const workHours = eventType.WORKHOURS ?? CONFIG.WORKHOURS;
   const daysInAdvance = eventType.MAX_DAYS_IN_ADVANCE ?? CONFIG.MAX_DAYS_IN_ADVANCE;
   const minDaysInAdvance = eventType.MIN_DAYS_IN_ADVANCE ?? CONFIG.MIN_DAYS_IN_ADVANCE ?? 0;
   const calendarsToQuery = eventType.CALENDARS ?? CONFIG.CALENDARS;
@@ -316,12 +353,9 @@ function fetchAvailability(eventTypeId?: string): {
     const endTime = new Date(t + durationMs);
     // Enforce the minimum lead time: hide slots earlier than minStart.
     if (start.getTime() < minStart.getTime()) continue;
-    const startTZ = new Date(
-      Utilities.formatDate(start, timeZone, "yyyy-MM-dd'T'HH:mm:ss")
-    );
-    if (startTZ.getHours() < workHours.start) continue;
-    if (startTZ.getHours() >= workHours.end) continue;
-    if (workDays.indexOf(startTZ.getDay()) < 0) continue;
+    // Per-slot window filters (grid, past-time, max-days, work hours/days),
+    // shared with bookTimeslot so the two can't drift.
+    if (!isSlotWithinWindow(start, eventType, now)) continue;
 
     const freeCalendarsCount = calendarsToQuery.filter((calId: string) => {
       return !eventsByCalendar[calId].some((event) => event.start < endTime && event.end > start);
@@ -361,6 +395,15 @@ function bookTimeslot(
   }
   const endTime = new Date(startTime.getTime());
   endTime.setUTCMinutes(startTime.getUTCMinutes() + durationMinutes);
+
+  // Authoritative availability re-validation: bookTimeslot is anonymously
+  // callable, so a crafted or stale request must satisfy the same per-slot
+  // filters the picker applied (grid alignment, past-time, max-days-in-advance,
+  // work hours, work days). Without this, a request could book 3am, a weekend,
+  // a past slot, or one years out as long as the calendar happened to be free.
+  if (!isSlotWithinWindow(startTime, eventType, new Date())) {
+    throw new Error("This time is not available for booking");
+  }
 
   // Authoritative minimum-lead-time check: reject bookings sooner than the
   // configured minimum days out, so a stale client can't book inside the window.

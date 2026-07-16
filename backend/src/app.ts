@@ -310,6 +310,26 @@ function isSlotWithinWindow(startTime: Date, eventType: EventType, now: Date): b
   return true;
 }
 
+// Interpret a Freebusy response for one calendar. A revoked, deleted, or
+// otherwise inaccessible calendar comes back with a populated `errors` array
+// (and an empty `busy`); reading `.busy` alone would treat it as fully free and
+// offer/confirm slots that actually conflict. Fail closed: return the busy
+// intervals only when the result is trustworthy, or null when the calendar must
+// be treated as busy.
+function freebusyIntervals(
+  response: any,
+  calendarId: string
+): { start: Date; end: Date }[] | null {
+  const cal = response && response.calendars && response.calendars[calendarId];
+  if (!cal || (cal.errors && cal.errors.length > 0) || !Array.isArray(cal.busy)) {
+    return null;
+  }
+  return cal.busy.map((b: { start: string; end: string }) => ({
+    start: new Date(b.start),
+    end: new Date(b.end),
+  }));
+}
+
 function fetchAvailability(eventTypeId?: string): {
   timeslots: string[];
   durationMinutes: number;
@@ -346,13 +366,11 @@ function fetchAvailability(eventTypeId?: string): {
     items: calendarsToQuery.map((id: string) => ({ id })),
   });
 
-  const eventsByCalendar: Record<string, { start: Date; end: Date }[]> = {};
+  // null for a calendar means its freebusy couldn't be trusted (errored /
+  // inaccessible); such calendars are treated as busy below (fail closed).
+  const eventsByCalendar: Record<string, { start: Date; end: Date }[] | null> = {};
   calendarsToQuery.forEach((calendarId: string) => {
-    const busyTimes = (response as any).calendars[calendarId].busy;
-    eventsByCalendar[calendarId] = busyTimes.map(({ start, end }: { start: string; end: string }) => ({
-      start: new Date(start),
-      end: new Date(end)
-    }));
+    eventsByCalendar[calendarId] = freebusyIntervals(response, calendarId);
   });
 
   // If a max-bookings limit is active, count existing bookings once over the
@@ -406,7 +424,10 @@ function fetchAvailability(eventTypeId?: string): {
 
       const endTime = new Date(t + durationMs);
       const freeCalendarsCount = calendarsToQuery.filter((calId: string) => {
-        return !eventsByCalendar[calId].some((event) => event.start < endTime && event.end > start);
+        const intervals = eventsByCalendar[calId];
+        // An errored/inaccessible calendar (null) is treated as busy.
+        if (intervals === null) return false;
+        return !intervals.some((event) => event.start < endTime && event.end > start);
       }).length;
 
       const isAvailable = strategy === 'round_robin'
@@ -539,9 +560,11 @@ function bookTimeslot(
       items: calendarsToUse.map((id: string) => ({ id })),
     });
 
-    const freeCalendars = calendarsToUse.filter((calId: string) =>
-      (possibleEvents as any).calendars[calId].busy.length === 0
-    );
+    const freeCalendars = calendarsToUse.filter((calId: string) => {
+      const intervals = freebusyIntervals(possibleEvents, calId);
+      // null = errored/inaccessible calendar; not free (fail closed).
+      return intervals !== null && intervals.length === 0;
+    });
 
     const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
     let guestsToInvite = [email];

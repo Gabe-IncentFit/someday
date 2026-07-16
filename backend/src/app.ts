@@ -245,21 +245,28 @@ function countBookingsByPeriod(
   return counts;
 }
 
+// UTC instant of `hour:00` local time in `tz`, `days` whole calendar days after
+// `from`'s local date. Reading the zone offset *at the target date/hour* (not at
+// `from`) keeps it correct across DST transitions.
+function tzHourPlusDays(from: Date, tz: string, days: number, hour: number): Date {
+  const [y, m, d] = Utilities.formatDate(from, tz, "yyyy-MM-dd").split("-").map(Number);
+  // Local wall-clock time of the target date/hour, first read as if it were UTC.
+  const wallAsUTC = new Date(Date.UTC(y, m - 1, d + days, hour));
+  // Shift by the zone's offset at that instant to get the true UTC instant. "Z"
+  // yields an RFC-822 offset like "-0400"; local = UTC + offset, so the UTC
+  // instant of the local wall time is wallAsUTC - offset.
+  const offset = Utilities.formatDate(wallAsUTC, tz, "Z");
+  const sign = offset.charAt(0) === '-' ? -1 : 1;
+  const offsetMin = sign * (parseInt(offset.slice(1, 3), 10) * 60 + parseInt(offset.slice(3, 5), 10));
+  return new Date(wallAsUTC.getTime() - offsetMin * 60000);
+}
+
 // UTC instant of midnight in `tz`, `days` whole calendar days after `from`.
 // Used for the minimum-notice boundary so "N days out" is measured as N local
 // days (midnight in the configured time zone), not from UTC midnight — which
 // for a non-UTC zone would let same-evening slots slip past the cutoff.
 function tzMidnightPlusDays(from: Date, tz: string, days: number): Date {
-  const [y, m, d] = Utilities.formatDate(from, tz, "yyyy-MM-dd").split("-").map(Number);
-  // Local wall-clock midnight of the target date, first read as if it were UTC.
-  const wallAsUTC = new Date(Date.UTC(y, m - 1, d + days));
-  // Shift by the zone's offset at that date to get the true UTC instant. "Z"
-  // yields an RFC-822 offset like "-0400"; local = UTC + offset, so the UTC
-  // instant of local midnight is wallAsUTC - offset.
-  const offset = Utilities.formatDate(wallAsUTC, tz, "Z");
-  const sign = offset.charAt(0) === '-' ? -1 : 1;
-  const offsetMin = sign * (parseInt(offset.slice(1, 3), 10) * 60 + parseInt(offset.slice(3, 5), 10));
-  return new Date(wallAsUTC.getTime() - offsetMin * 60000);
+  return tzHourPlusDays(from, tz, days, 0);
 }
 
 // Per-slot window checks shared by fetchAvailability (which builds the grid) and
@@ -277,11 +284,14 @@ function isSlotWithinWindow(startTime: Date, eventType: EventType, now: Date): b
   const durationMs = eventType.duration * 60000;
   const t = startTime.getTime();
 
-  // Grid alignment: valid slots sit on the epoch-aligned duration grid.
-  if (t % durationMs !== 0) return false;
-  // Past-time: not before the current (floored) grid slot.
-  const nearest = Math.floor(now.getTime() / durationMs) * durationMs;
-  if (t < nearest) return false;
+  // Past-time: not before now.
+  if (t < now.getTime()) return false;
+  // Grid alignment: each local day's slots are anchored to workHours.start (not
+  // the UTC epoch), so boundaries line up with the start of the work window for
+  // any duration or zone offset. Reject slots that fall between the grid points.
+  const dayAnchor = tzHourPlusDays(startTime, timeZone, 0, workHours.start).getTime();
+  if (t < dayAnchor) return false;
+  if ((t - dayAnchor) % durationMs !== 0) return false;
   // Max days in advance: the whole slot must end on/before the window end,
   // computed the same way as fetchAvailability's `end`.
   const windowEnd = Date.UTC(
@@ -315,10 +325,7 @@ function fetchAvailability(eventTypeId?: string): {
   const minDaysInAdvance = eventType.MIN_DAYS_IN_ADVANCE ?? CONFIG.MIN_DAYS_IN_ADVANCE ?? 0;
   const calendarsToQuery = eventType.CALENDARS ?? CONFIG.CALENDARS;
 
-  const nearestTimeslot = new Date(
-    Math.floor(new Date().getTime() / durationMs) * durationMs
-  );
-  const now = nearestTimeslot;
+  const now = new Date();
   const end = new Date(
     Date.UTC(
       now.getUTCFullYear(),
@@ -370,37 +377,52 @@ function fetchAvailability(eventTypeId?: string): {
   //get all timeslots between now and end date
   const timeslots = [];
   const strategy = eventType.schedulingStrategy ?? CONFIG.schedulingStrategy ?? 'collective';
+  const workHours = eventType.WORKHOURS ?? CONFIG.WORKHOURS;
 
-  for (
-    let t = nearestTimeslot.getTime();
-    t + durationMs <= end.getTime();
-    t += durationMs
-  ) {
-    const start = new Date(t);
-    const endTime = new Date(t + durationMs);
-    // Enforce the minimum lead time: hide slots earlier than minStart.
-    if (start.getTime() < minStart.getTime()) continue;
-    // Per-slot window filters (grid, past-time, max-days, work hours/days),
-    // shared with bookTimeslot so the two can't drift.
-    if (!isSlotWithinWindow(start, eventType, now)) continue;
+  // Generate slots one local day at a time, anchoring each day's grid to
+  // workHours.start (recomputed per day so it stays correct across DST). This
+  // keeps slot boundaries aligned to the start of the work window for any
+  // duration or zone offset; an epoch-anchored grid would phase them to UTC
+  // midnight, which only coincides with workHours.start for whole-hour
+  // durations in whole-hour-offset zones. isSlotWithinWindow re-validates every
+  // candidate (and does the work-day filtering), so it stays authoritative.
+  for (let dayOffset = 0; dayOffset <= daysInAdvance + 1; dayOffset++) {
+    const dayStart = tzHourPlusDays(now, timeZone, dayOffset, workHours.start);
+    if (dayStart.getTime() >= end.getTime()) break;
 
-    const freeCalendarsCount = calendarsToQuery.filter((calId: string) => {
-      return !eventsByCalendar[calId].some((event) => event.start < endTime && event.end > start);
-    }).length;
+    for (
+      let t = dayStart.getTime();
+      t + durationMs <= end.getTime();
+      t += durationMs
+    ) {
+      const start = new Date(t);
+      // Stop once this day's work window is over (compare the local hour).
+      if (parseInt(Utilities.formatDate(start, timeZone, "H"), 10) >= workHours.end) break;
+      // Enforce the minimum lead time: hide slots earlier than minStart.
+      if (t < minStart.getTime()) continue;
+      // Per-slot window filters (alignment, past-time, max-days, work
+      // hours/days), shared with bookTimeslot so the two can't drift.
+      if (!isSlotWithinWindow(start, eventType, now)) continue;
 
-    const isAvailable = strategy === 'round_robin'
-      ? freeCalendarsCount > 0
-      : freeCalendarsCount === calendarsToQuery.length;
+      const endTime = new Date(t + durationMs);
+      const freeCalendarsCount = calendarsToQuery.filter((calId: string) => {
+        return !eventsByCalendar[calId].some((event) => event.start < endTime && event.end > start);
+      }).length;
 
-    if (!isAvailable) continue;
+      const isAvailable = strategy === 'round_robin'
+        ? freeCalendarsCount > 0
+        : freeCalendarsCount === calendarsToQuery.length;
 
-    // Skip slots whose period has already reached the booking limit.
-    if (limitActive) {
-      const key = periodKey(start, eventType.maxBookingsPeriod!, timeZone);
-      if ((bookingCounts[key] || 0) >= eventType.maxBookings!) continue;
+      if (!isAvailable) continue;
+
+      // Skip slots whose period has already reached the booking limit.
+      if (limitActive) {
+        const key = periodKey(start, eventType.maxBookingsPeriod!, timeZone);
+        if ((bookingCounts[key] || 0) >= eventType.maxBookings!) continue;
+      }
+
+      timeslots.push(start.toISOString());
     }
-
-    timeslots.push(start.toISOString());
   }
   return { timeslots, durationMinutes };
 }

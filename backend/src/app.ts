@@ -292,13 +292,9 @@ function isSlotWithinWindow(startTime: Date, eventType: EventType, now: Date): b
   const dayAnchor = tzHourPlusDays(startTime, timeZone, 0, workHours.start).getTime();
   if (t < dayAnchor) return false;
   if ((t - dayAnchor) % durationMs !== 0) return false;
-  // Max days in advance: the whole slot must end on/before the window end,
-  // computed the same way as fetchAvailability's `end`.
-  const windowEnd = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate() + daysInAdvance
-  );
+  // Max days in advance: the whole slot must end on/before the window end —
+  // local midnight `daysInAdvance` days out, matching fetchAvailability's `end`.
+  const windowEnd = tzMidnightPlusDays(now, timeZone, daysInAdvance).getTime();
   if (t + durationMs > windowEnd) return false;
   // Work hours / work days in the configured time zone.
   const startTZ = new Date(
@@ -346,13 +342,11 @@ function fetchAvailability(eventTypeId?: string): {
   const calendarsToQuery = eventType.CALENDARS ?? CONFIG.CALENDARS;
 
   const now = new Date();
-  const end = new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() + daysInAdvance
-    )
-  );
+  // End of the booking window: local midnight `daysInAdvance` days out, in the
+  // configured time zone — the same basis as every other boundary (see
+  // tzMidnightPlusDays). Using UTC midnight here would shift the window by the
+  // zone offset and drop/truncate the final advance day for non-UTC zones.
+  const end = tzMidnightPlusDays(now, timeZone, daysInAdvance);
   // Earliest bookable moment: enforce a minimum lead time so slots sooner than
   // `minDaysInAdvance` days out are hidden (0 = no minimum). Measured as whole
   // calendar days in the configured time zone.

@@ -213,6 +213,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return;
         }
 
+        // Work hours must describe a real window. start >= end is accepted by the
+        // dropdowns but leaves every slot failing the work-hours filter, so the
+        // picker is permanently and silently empty.
+        if (config.WORKHOURS.start >= config.WORKHOURS.end) {
+            alert("Work hours: the start time must be earlier than the end time.");
+            return;
+        }
+
         // Limit timeslot duration to 24 hours (1440 minutes)
         for (const et of config.EVENT_TYPES) {
             if (et.duration > 1440) {
@@ -226,6 +234,11 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             // undefined = inherit the global list; [] = the same fail-open trap.
             if (et.CALENDARS && et.CALENDARS.length === 0) {
                 alert(`${et.name} must monitor at least one calendar, or reset it to use the global setting.`);
+                return;
+            }
+            // Same trap as the global work hours above, per event type.
+            if (et.WORKHOURS && et.WORKHOURS.start >= et.WORKHOURS.end) {
+                alert(`Work hours for ${et.name}: the start time must be earlier than the end time.`);
                 return;
             }
             // The 90-day cap is enforced on the global window above; a per-event

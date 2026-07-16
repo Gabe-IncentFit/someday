@@ -257,6 +257,13 @@ function periodKey(date: Date, period: BookingPeriod, tz: string): string {
 // calendars. Each booking is tagged (private extended property) on exactly one
 // calendar (organizer/target copy), so summing across calendars does not double
 // count and yields the aggregate for the whole event type.
+//
+// A calendar whose access was revoked (or that was deleted) makes Events.list
+// throw, which would take the whole caller down. Record it in `failedCalendars`
+// and carry on instead. Note this is NOT freebusy's fail-closed situation: an
+// unreadable calendar here means the result is an *undercount*, which is
+// fail-OPEN for the limit — so a caller that enforces the limit must treat a
+// non-empty `failedCalendars` as "cannot verify", not as "no bookings".
 function countBookingsByPeriod(
   calendarIds: string[],
   eventTypeId: string,
@@ -264,32 +271,40 @@ function countBookingsByPeriod(
   timeMax: Date,
   period: BookingPeriod,
   tz: string
-): Record<string, number> {
+): { counts: Record<string, number>; failedCalendars: string[] } {
   const counts: Record<string, number> = {};
+  const failedCalendars: string[] = [];
   calendarIds.forEach((calId) => {
-    let pageToken: string | undefined = undefined;
-    do {
-      const resp: any = Calendar.Events!.list(calId, {
-        privateExtendedProperty: 'somedayEventTypeId=' + eventTypeId,
-        timeMin: timeMin.toISOString(),
-        timeMax: timeMax.toISOString(),
-        singleEvents: true,
-        showDeleted: false,
-        maxResults: 2500,
-        pageToken,
-      });
-      (resp.items || []).forEach((ev: any) => {
-        // Don't let cancelled bookings consume limit slots.
-        if (ev.status === 'cancelled') return;
-        const startStr = ev.start && (ev.start.dateTime || ev.start.date);
-        if (!startStr) return;
-        const key = periodKey(new Date(startStr), period, tz);
-        counts[key] = (counts[key] || 0) + 1;
-      });
-      pageToken = resp.nextPageToken;
-    } while (pageToken);
+    try {
+      let pageToken: string | undefined = undefined;
+      do {
+        const resp: any = Calendar.Events!.list(calId, {
+          privateExtendedProperty: 'somedayEventTypeId=' + eventTypeId,
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
+          singleEvents: true,
+          showDeleted: false,
+          maxResults: 2500,
+          pageToken,
+        });
+        (resp.items || []).forEach((ev: any) => {
+          // Don't let cancelled bookings consume limit slots.
+          if (ev.status === 'cancelled') return;
+          const startStr = ev.start && (ev.start.dateTime || ev.start.date);
+          if (!startStr) return;
+          const key = periodKey(new Date(startStr), period, tz);
+          counts[key] = (counts[key] || 0) + 1;
+        });
+        pageToken = resp.nextPageToken;
+      } while (pageToken);
+    } catch (e) {
+      // Revoked access, deleted calendar, transient API failure. Anything this
+      // calendar contributed is now unknown (and may be partial if it failed
+      // mid-paging), so the caller decides what an unverifiable count means.
+      failedCalendars.push(calId);
+    }
   });
-  return counts;
+  return { counts, failedCalendars };
 }
 
 // UTC instant of `hour:00` local time in `tz`, `days` whole calendar days after
@@ -437,12 +452,19 @@ function fetchAvailability(eventTypeId?: string): {
   // relative to bookTimeslot's padded check. That can only happen if bookings
   // exist beyond the scheduling window; the authoritative check in bookTimeslot
   // still prevents overbooking, so the worst case is a slot shown then rejected.
+  //
+  // Counting is best-effort here: a calendar we can't read (revoked access, say)
+  // is reported in failedCalendars and simply leaves its bookings uncounted, so
+  // a maxed-out period may still show slots. That lands in the same worst case
+  // as the note above — shown, then rejected by the authoritative check in
+  // bookTimeslot — and is far better than one revoked teammate calendar taking
+  // the whole availability page down.
   const limitActive = hasBookingLimit(eventType);
   const countFrom = limitActive
     ? new Date(now.getTime() - periodPaddingMs(eventType.maxBookingsPeriod!))
     : now;
   const bookingCounts = limitActive
-    ? countBookingsByPeriod(calendarsToQuery, eventType.id, countFrom, end, eventType.maxBookingsPeriod!, timeZone)
+    ? countBookingsByPeriod(calendarsToQuery, eventType.id, countFrom, end, eventType.maxBookingsPeriod!, timeZone).counts
     : {};
 
   //get all timeslots between now and end date
@@ -594,7 +616,7 @@ function bookTimeslot(
       const tz = CONFIG.TIME_ZONE;
       const period = eventType.maxBookingsPeriod!;
       const padMs = periodPaddingMs(period);
-      const counts = countBookingsByPeriod(
+      const { counts, failedCalendars } = countBookingsByPeriod(
         calendarsToUse,
         eventType.id,
         new Date(startTime.getTime() - padMs),
@@ -602,6 +624,14 @@ function bookTimeslot(
         period,
         tz
       );
+      // A calendar we couldn't read may hold bookings for this period, so the
+      // count is an undercount and trusting it could let the limit be exceeded.
+      // This check is the authoritative one, so fail closed instead. (The
+      // availability page tolerates the same failure — it only risks showing a
+      // slot that this check then rejects.)
+      if (failedCalendars.length > 0) {
+        throw new Error("Could not verify the booking limit, please try again");
+      }
       const key = periodKey(startTime, period, tz);
       if ((counts[key] || 0) >= eventType.maxBookings!) {
         throw new Error("Booking limit reached for this period");

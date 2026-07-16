@@ -307,20 +307,52 @@ function countBookingsByPeriod(
   return { counts, failedCalendars };
 }
 
+// Utilities.formatDate crosses the JS<->Java bridge and dominates availability
+// generation: isSlotWithinWindow resolves three tz instants per slot (dayAnchor,
+// dayClose, windowEnd) and each did two formatDate calls, so a 90-day window of
+// 15-minute slots (~2,500 slots) cost thousands of round-trips.
+//
+// Both lookups are *pure* functions of their inputs, so memoize them rather than
+// hoisting the loop-invariant parts out of isSlotWithinWindow — that would mean
+// splitting it, and it has to stay the single shared filter bookTimeslot
+// re-validates against. One implementation, no drift.
+//
+// Caches live for one execution (Apps Script re-evaluates globals per run) and
+// are keyed on everything the result depends on, so they can't go stale.
+const localDateCache: Record<string, string> = {};
+const tzInstantCache: Record<string, number> = {};
+
 // UTC instant of `hour:00` local time in `tz`, `days` whole calendar days after
 // `from`'s local date. Reading the zone offset *at the target date/hour* (not at
 // `from`) keeps it correct across DST transitions.
 function tzHourPlusDays(from: Date, tz: string, days: number, hour: number): Date {
-  const [y, m, d] = Utilities.formatDate(from, tz, "yyyy-MM-dd").split("-").map(Number);
+  // dayAnchor and dayClose resolve the same slot, and windowEnd re-resolves the
+  // loop-invariant `now`, so this lookup repeats constantly.
+  const fromKey = tz + "|" + from.getTime();
+  let localDate = localDateCache[fromKey];
+  if (localDate === undefined) {
+    localDate = Utilities.formatDate(from, tz, "yyyy-MM-dd");
+    localDateCache[fromKey] = localDate;
+  }
+  const [y, m, d] = localDate.split("-").map(Number);
+
   // Local wall-clock time of the target date/hour, first read as if it were UTC.
-  const wallAsUTC = new Date(Date.UTC(y, m - 1, d + days, hour));
+  // This value *is* the (y-m-d, hour) key: every slot on a given day resolves to
+  // the same handful of them (workHours.start, workHours.end, midnight).
+  const wallAsUTC = Date.UTC(y, m - 1, d + days, hour);
+  const targetKey = tz + "|" + wallAsUTC;
+  const cached = tzInstantCache[targetKey];
+  if (cached !== undefined) return new Date(cached);
+
   // Shift by the zone's offset at that instant to get the true UTC instant. "Z"
   // yields an RFC-822 offset like "-0400"; local = UTC + offset, so the UTC
   // instant of the local wall time is wallAsUTC - offset.
-  const offset = Utilities.formatDate(wallAsUTC, tz, "Z");
+  const offset = Utilities.formatDate(new Date(wallAsUTC), tz, "Z");
   const sign = offset.charAt(0) === '-' ? -1 : 1;
   const offsetMin = sign * (parseInt(offset.slice(1, 3), 10) * 60 + parseInt(offset.slice(3, 5), 10));
-  return new Date(wallAsUTC.getTime() - offsetMin * 60000);
+  const resolved = wallAsUTC - offsetMin * 60000;
+  tzInstantCache[targetKey] = resolved;
+  return new Date(resolved);
 }
 
 // UTC instant of midnight in `tz`, `days` whole calendar days after `from`.

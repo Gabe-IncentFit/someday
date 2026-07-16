@@ -130,12 +130,23 @@ function setConfig(newConfig: Partial<typeof CONFIG>) {
   if (newConfig.CALENDARS && newConfig.CALENDARS.length === 0) {
     throw new Error("At least one monitored calendar is required.");
   }
+  // Likewise an empty work-day list: it stores fine ([] is truthy, and the
+  // loader keeps the "[]" string over its default), then every slot fails the
+  // work-day filter and the picker is silently empty forever.
+  if (newConfig.WORKDAYS && newConfig.WORKDAYS.length === 0) {
+    throw new Error("At least one available day is required.");
+  }
   if (newConfig.EVENT_TYPES) {
     for (const et of newConfig.EVENT_TYPES) {
       // undefined = inherit the global list; [] = the same fail-open trap.
       if (et.CALENDARS && et.CALENDARS.length === 0) {
         throw new Error(
           `Event type "${et.name}" must monitor at least one calendar, or reset it to use the global setting.`
+        );
+      }
+      if (et.WORKDAYS && et.WORKDAYS.length === 0) {
+        throw new Error(
+          `Event type "${et.name}" must have at least one available day, or reset it to use the global setting.`
         );
       }
     }

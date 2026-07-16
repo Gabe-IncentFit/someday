@@ -267,6 +267,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return;
         }
 
+        // At least one available day is required. Unchecking every day saves
+        // fine but leaves every slot failing the work-day filter, so the picker
+        // goes silently empty.
+        if (!config.WORKDAYS || config.WORKDAYS.length === 0) {
+            alert("Please select at least one available day.");
+            return;
+        }
+
         // Limit timeslot duration to 24 hours (1440 minutes)
         for (const et of config.EVENT_TYPES) {
             if (et.duration > 1440) {
@@ -280,6 +288,11 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             // undefined = inherit the global list; [] = the same fail-open trap.
             if (et.CALENDARS && et.CALENDARS.length === 0) {
                 alert(`${et.name} must monitor at least one calendar, or reset it to use the global setting.`);
+                return;
+            }
+            // undefined = inherit the global days; [] = the same silent-empty trap.
+            if (et.WORKDAYS && et.WORKDAYS.length === 0) {
+                alert(`${et.name} must have at least one available day, or reset it to use the global setting.`);
                 return;
             }
             // Same trap as the global work hours above, per event type.

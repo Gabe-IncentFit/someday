@@ -12,7 +12,7 @@ export interface EventType {
     // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
     // and maxBookingsPeriod is set. Applies to the whole event type (aggregate).
     maxBookings?: number;
-    maxBookingsPeriod?: 'day' | 'week' | 'month';
+    maxBookingsPeriod?: 'day' | 'week' | 'month' | 'quarter' | 'year';
     // Guest permissions
     guestsCanModify?: boolean;
     guestsCanInviteOthers?: boolean;

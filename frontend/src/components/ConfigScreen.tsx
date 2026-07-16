@@ -208,8 +208,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                     alert(`Max bookings for ${et.name} must be a positive whole number.`);
                     return;
                 }
-                if (!['day', 'week', 'month'].includes(et.maxBookingsPeriod ?? '')) {
-                    alert(`Please select a period (day, week, or month) for the ${et.name} booking limit.`);
+                if (!['day', 'week', 'month', 'quarter', 'year'].includes(et.maxBookingsPeriod ?? '')) {
+                    alert(`Please select a period (day, week, month, quarter, or year) for the ${et.name} booking limit.`);
                     return;
                 }
             }
@@ -852,7 +852,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                         </Button>
                                                     </DropdownMenuTrigger>
                                                     <DropdownMenuContent>
-                                                        {(['day', 'week', 'month'] as const).map((p) => (
+                                                        {(['day', 'week', 'month', 'quarter', 'year'] as const).map((p) => (
                                                             <DropdownMenuItem
                                                                 key={p}
                                                                 className="capitalize"

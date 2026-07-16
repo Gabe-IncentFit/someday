@@ -1,5 +1,7 @@
 const props = PropertiesService.getScriptProperties();
 
+type BookingPeriod = 'day' | 'week' | 'month' | 'quarter' | 'year';
+
 interface EventType {
   id: string;
   name: string;
@@ -14,7 +16,7 @@ interface EventType {
   // Max bookings limit (undefined/0 = no limit). Active only when maxBookings > 0
   // and maxBookingsPeriod is set. Applies to the whole event type (aggregate).
   maxBookings?: number;
-  maxBookingsPeriod?: 'day' | 'week' | 'month';
+  maxBookingsPeriod?: BookingPeriod;
   // Guest permissions
   guestsCanModify?: boolean;
   guestsCanInviteOthers?: boolean;
@@ -122,18 +124,40 @@ function doGet(): GoogleAppsScript.HTML.HtmlOutput {
     .addMetaTag("viewport", "width=device-width, initial-scale=1");
 }
 
+const VALID_BOOKING_PERIODS: BookingPeriod[] = ['day', 'week', 'month', 'quarter', 'year'];
+
 // Returns true when the event type has an active max-bookings limit.
 function hasBookingLimit(eventType: EventType): boolean {
   return typeof eventType.maxBookings === 'number'
     && eventType.maxBookings > 0
-    && (eventType.maxBookingsPeriod === 'day'
-      || eventType.maxBookingsPeriod === 'week'
-      || eventType.maxBookingsPeriod === 'month');
+    && VALID_BOOKING_PERIODS.indexOf(eventType.maxBookingsPeriod as BookingPeriod) >= 0;
+}
+
+// How far the count window must reach back from "now" to cover the *start* of
+// the current period (which for longer periods began well before now), sized
+// generously per period so the current bucket is never undercounted.
+function periodPaddingMs(period: BookingPeriod): number {
+  const DAY = 24 * 60 * 60 * 1000;
+  switch (period) {
+    case 'day': return 2 * DAY;
+    case 'week': return 9 * DAY;
+    case 'month': return 40 * DAY;
+    case 'quarter': return 100 * DAY;
+    case 'year': return 375 * DAY;
+  }
 }
 
 // Bucket key for a date within the configured time zone. Bookings sharing a key
-// fall in the same limit period. Weeks start on Sunday.
-function periodKey(date: Date, period: 'day' | 'week' | 'month', tz: string): string {
+// fall in the same limit period. Weeks start on Sunday; quarters and years are
+// calendar-based (Q1 = Jan–Mar, etc.).
+function periodKey(date: Date, period: BookingPeriod, tz: string): string {
+  if (period === 'year') {
+    return Utilities.formatDate(date, tz, "yyyy");
+  }
+  if (period === 'quarter') {
+    const [yy, mm] = Utilities.formatDate(date, tz, "yyyy-MM").split("-").map(Number);
+    return yy + "-Q" + (Math.floor((mm - 1) / 3) + 1);
+  }
   if (period === 'month') {
     return Utilities.formatDate(date, tz, "yyyy-MM");
   }
@@ -160,7 +184,7 @@ function countBookingsByPeriod(
   eventTypeId: string,
   timeMin: Date,
   timeMax: Date,
-  period: 'day' | 'week' | 'month',
+  period: BookingPeriod,
   tz: string
 ): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -234,16 +258,19 @@ function fetchAvailability(eventTypeId?: string): {
 
   // If a max-bookings limit is active, count existing bookings once over the
   // whole window, bucketed by period, so maxed-out periods can be hidden.
-  // The lower bound reaches ~40 days before now so the *current* period (which
-  // usually started before now for week/month) is fully counted — otherwise it
-  // would be undercounted and slots shown that bookTimeslot then rejects.
+  // The lower bound reaches back far enough (per period) to fully cover the
+  // *current* period, which usually started before now (and much earlier for
+  // quarter/year) — otherwise it would be undercounted and slots shown that
+  // bookTimeslot then rejects.
   // Note: the upper bound is only `end` (now + daysInAdvance), not padded, so a
   // period straddling the end of the display window could be undercounted here
-  // relative to bookTimeslot's ±40d check. That can only happen if bookings
+  // relative to bookTimeslot's padded check. That can only happen if bookings
   // exist beyond the scheduling window; the authoritative check in bookTimeslot
   // still prevents overbooking, so the worst case is a slot shown then rejected.
   const limitActive = hasBookingLimit(eventType);
-  const countFrom = new Date(now.getTime() - 40 * 24 * 60 * 60 * 1000);
+  const countFrom = limitActive
+    ? new Date(now.getTime() - periodPaddingMs(eventType.maxBookingsPeriod!))
+    : now;
   const bookingCounts = limitActive
     ? countBookingsByPeriod(calendarsToQuery, eventType.id, countFrom, end, eventType.maxBookingsPeriod!, timeZone)
     : {};
@@ -324,7 +351,7 @@ function bookTimeslot(
     try {
       const tz = CONFIG.TIME_ZONE;
       const period = eventType.maxBookingsPeriod!;
-      const padMs = 40 * 24 * 60 * 60 * 1000;
+      const padMs = periodPaddingMs(period);
       const counts = countBookingsByPeriod(
         calendarsToUse,
         eventType.id,

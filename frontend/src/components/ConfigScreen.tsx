@@ -228,6 +228,13 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                 alert(`${et.name} must monitor at least one calendar, or reset it to use the global setting.`);
                 return;
             }
+            // The 90-day cap is enforced on the global window above; a per-event
+            // override has to respect it too, or it bypasses the cap entirely.
+            if (et.MAX_DAYS_IN_ADVANCE !== undefined &&
+                (!Number.isInteger(et.MAX_DAYS_IN_ADVANCE) || et.MAX_DAYS_IN_ADVANCE < 1 || et.MAX_DAYS_IN_ADVANCE > 90)) {
+                alert(`Scheduling window for ${et.name} must be a whole number between 1 and 90 days.`);
+                return;
+            }
             // Validate the per-event minimum-notice override value itself.
             if (et.MIN_DAYS_IN_ADVANCE !== undefined &&
                 (!Number.isInteger(et.MIN_DAYS_IN_ADVANCE) || et.MIN_DAYS_IN_ADVANCE < 0)) {
@@ -814,6 +821,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 </div>
                                                 <Input
                                                     type="number"
+                                                    min="1"
+                                                    max="90"
                                                     placeholder={`Global: ${config.MAX_DAYS_IN_ADVANCE}`}
                                                     value={et.MAX_DAYS_IN_ADVANCE || ""}
                                                     onChange={(e) => updateEventType(index, { MAX_DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}

@@ -137,6 +137,20 @@ function ClampedNumberInput({
     );
 }
 
+// Slugs are interpolated straight into booking URLs, so keep them to RFC 3986
+// unreserved characters. Lowercasing and collapsing whitespace alone let through
+// &, ? and #, which truncate or reroute the query string — "q3&sales" becomes
+// event-type=q3 plus a stray "sales" param, silently opening the wrong event.
+//
+// Each *run* of unsafe characters (whitespace included, which subsumes the old
+// \s+ rule) becomes a single "-", so "Q3 & Sales" reads "q3-sales" rather than
+// "q3---sales". Allowed characters — dashes included — are left alone, and
+// nothing is trimmed: trimming would fight you mid-edit, eating the dash in
+// "q3-" before you could type the next word.
+function toSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._~-]+/g, "-");
+}
+
 export function ConfigScreen({ onBack }: { onBack: () => void }) {
     const [config, setConfig] = useState<Config | null>(null);
     const [availableCalendars, setAvailableCalendars] = useState<CalendarInfo[]>([]);
@@ -698,7 +712,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                         <Input
                                             id={`slug-${index}`}
                                             value={et.id}
-                                            onChange={(e) => updateEventType(index, { id: e.target.value.replace(/\s+/g, '-').toLowerCase() })}
+                                            onChange={(e) => updateEventType(index, { id: toSlug(e.target.value) })}
                                             placeholder="e.g. 30min"
                                             className={duplicateIds.includes(et.id) ? "border-destructive ring-destructive shadow-[0_0_0_1px_rgba(239,68,68,0.5)]" : ""}
                                         />
@@ -856,7 +870,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             size="sm"
                                             className="h-8"
                                             onClick={() => {
-                                                const url = `${scriptUrl}?event-type=${et.id}`;
+                                                // Encode rather than interpolate raw: a slug saved before
+                                                // toSlug() existed can still hold & or #, and both readers
+                                                // (URLSearchParams and Apps Script's getLocation) decode.
+                                                const url = `${scriptUrl}?event-type=${encodeURIComponent(et.id)}`;
                                                 navigator.clipboard.writeText(url);
                                             }}
                                         >

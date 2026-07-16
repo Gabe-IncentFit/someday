@@ -31,6 +31,7 @@ export function useGoogleTimeslots(eventTypeId?: string) {
           setStatus("success");
         })
         .withFailureHandler(function (err: Error) {
+          setStatus("error");
           setError(err);
         })
         .fetchAvailability(eventTypeId);

@@ -40,8 +40,8 @@ function App() {
         let configData: Config | null = null;
 
         if (typeof google !== "undefined") {
-          owner = await new Promise<boolean>((resolve) => {
-            GoogleLib.google.script.run.withSuccessHandler(resolve).isOwner();
+          owner = await new Promise<boolean>((resolve, reject) => {
+            GoogleLib.google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).isOwner();
           });
           configData = await new Promise<Config>((resolve, reject) => {
             GoogleLib.google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).getConfig();

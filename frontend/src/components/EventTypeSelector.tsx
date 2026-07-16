@@ -13,13 +13,23 @@ export function EventTypeSelector({ eventTypes, onSelect, onOpenConfig }: EventT
     return (
         <div className="sm:w-[600px] mx-auto space-y-4 relative">
             <div className="flex justify-between items-center mb-6">
-                <h1 className="text-2xl font-bold">Select Appointment Type</h1>
+                <h1 className="text-2xl font-bold">
+                    {eventTypes.length === 0 ? "Nothing to book right now" : "Select Appointment Type"}
+                </h1>
                 {onOpenConfig && (
                     <Button variant="outline" size="icon" onClick={onOpenConfig}>
                         <Settings className="h-4 w-4" />
                     </Button>
                 )}
             </div>
+
+            {eventTypes.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                    There are no appointment types available on this page.
+                    {/* Only the owner gets onOpenConfig, so this hint stays private. */}
+                    {onOpenConfig && " Enable one under Settings, or share a direct link."}
+                </p>
+            )}
 
             <div className="grid grid-cols-1 gap-4">
                 {eventTypes.map((et) => (

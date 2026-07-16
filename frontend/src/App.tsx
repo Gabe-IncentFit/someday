@@ -6,11 +6,22 @@ import { DemoBanner } from "@/DemoBanner";
 import { ConfigScreen } from "@/components/ConfigScreen";
 import { Config, EventType } from "@/models/EventType";
 import { EventTypeSelector } from "@/components/EventTypeSelector";
+import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import "./App.css";
 import "./index.css";
 
 import { GoogleLib } from "@/lib/googlelib";
+
+function LoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen gap-4 p-6 text-center">
+      <h2 className="text-lg font-semibold">Couldn't load the scheduler</h2>
+      <p className="text-sm text-muted-foreground max-w-sm">{message}</p>
+      <Button onClick={onRetry}>Try again</Button>
+    </div>
+  );
+}
 
 function App() {
   const [isOwner, setIsOwner] = useState(false);
@@ -18,6 +29,9 @@ function App() {
   const [config, setConfig] = useState<Config | null>(null);
   const [selectedEventType, setSelectedEventType] = useState<EventType | null>(null);
   const [loading, setLoading] = useState(true);
+  const [initError, setInitError] = useState<Error | null>(null);
+  // Bumped by the retry button to re-run the init effect.
+  const [retryCount, setRetryCount] = useState(0);
 
   const determineInitialView = (data: Config) => {
     const selectable = data.EVENT_TYPES.filter(et => et.selectable);
@@ -27,14 +41,22 @@ function App() {
     } else if (selectable.length > 1) {
       setView("event-selector");
     } else {
-      // No selectable events? Show first one anyway or config?
-      setSelectedEventType(data.EVENT_TYPES[0]);
-      setView("calendar");
+      // Nothing is selectable: every type is direct-link-only, so the public
+      // page has nothing to offer. Serving EVENT_TYPES[0] anyway contradicted
+      // the toggle's own promise ("If disabled, this type can only be booked
+      // via direct links") and published a type the owner had deliberately
+      // hidden. Show the empty selector instead — it still carries the owner's
+      // settings gear, which answers the old "or config?" question here.
+      // Direct links are unaffected: they match by id before this runs.
+      setSelectedEventType(null);
+      setView("event-selector");
     }
   };
 
   useEffect(() => {
     const fetchData = async () => {
+      setLoading(true);
+      setInitError(null);
       try {
         let owner = false;
         let configData: Config | null = null;
@@ -46,7 +68,10 @@ function App() {
           configData = await new Promise<Config>((resolve, reject) => {
             GoogleLib.google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).getConfig();
           });
-        } else if (isDev) {
+        } else if (isDev || isDemoMode) {
+          // Demo builds have no Apps Script `google` global and isDev is false,
+          // so without this they fell through with configData null — leaving the
+          // same null eventType the guard below now rejects.
           owner = true;
           configData = {
             TIME_ZONE: "America/New_York",
@@ -98,19 +123,36 @@ function App() {
         }
       } catch (err) {
         console.error("Failed to initialize app:", err);
+        // Surface it. Swallowing this left config/selectedEventType null while
+        // the view stayed on "calendar", so the picker still rendered and slots
+        // still loaded (availability is a separate RPC that tolerates an
+        // undefined event type). Everything looked fine until Send threw on
+        // eventType.id inside an event handler — which React doesn't catch — so
+        // the button just did nothing, permanently and with no feedback.
+        setInitError(err instanceof Error ? err : new Error(String(err)));
       } finally {
         setLoading(false);
       }
     };
 
     fetchData();
-  }, []);
+  }, [retryCount]);
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
       </div>
+    );
+  }
+
+  const retryInit = () => setRetryCount((count) => count + 1);
+
+  if (initError) {
+    return (
+      <ThemeProvider>
+        <LoadFailure message={initError.message} onRetry={retryInit} />
+      </ThemeProvider>
     );
   }
 
@@ -142,11 +184,18 @@ function App() {
             onSelect={handleSelectEventType}
             onOpenConfig={isOwner ? () => setView("config") : undefined}
           />
-        ) : (
+        ) : selectedEventType ? (
           <CalendarPicker
             onOpenConfig={isOwner ? () => setView("config") : undefined}
-            eventType={selectedEventType!}
+            eventType={selectedEventType}
             onBack={config && config.EVENT_TYPES.filter(et => et.selectable).length > 1 ? handleBackToSelector : undefined}
+          />
+        ) : (
+          // No usable event type: rendering the picker anyway (via
+          // selectedEventType!) looked fine until Send threw on eventType.id.
+          <LoadFailure
+            message="No event type is available to book."
+            onRetry={retryInit}
           />
         )}
       </div>

@@ -8,9 +8,14 @@ export function useGoogleTimeslots(eventTypeId?: string) {
   const [status, setStatus] = useState<
     "idle" | "pending" | "success" | "error"
   >("idle");
+  // Bumped by reset() to re-run the fetch effect below.
+  const [retryCount, setRetryCount] = useState(0);
   const reset = useCallback(() => {
     setStatus("idle");
     setError(null);
+    // Actually retry. Clearing the error only closed the dialog and left the
+    // picker idle with no slots — there was no way back short of a reload.
+    setRetryCount((count) => count + 1);
   }, []);
 
   useEffect(() => {
@@ -40,7 +45,7 @@ export function useGoogleTimeslots(eventTypeId?: string) {
       setStatus("error");
       setError(error as Error);
     }
-  }, [eventTypeId]);
+  }, [eventTypeId, retryCount]);
 
   return [availableGoogleSlots, durationMinutes, status, error, reset] as const;
 }

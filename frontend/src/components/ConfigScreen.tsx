@@ -92,6 +92,66 @@ function TimeDropdown({ value, onChange, placeholder }: { value?: number; onChan
     );
 }
 
+// A number input that doesn't fight you mid-edit. Clamping on every keystroke
+// silently mangles input: with a NaN fallback re-filling the box, clearing "28"
+// and typing "45" goes ""->1->"14"->"145", and the clamp freezes that at the
+// max (90). Keep the raw text in local state while editing and only clamp on
+// blur; the field is free to be empty in between. Save-time validation still
+// has the final say.
+function ClampedNumberInput({
+    value,
+    min,
+    max,
+    fallback,
+    onCommit,
+    ...rest
+}: {
+    value: number | undefined;
+    min: number;
+    max: number;
+    // Value to commit when the field is left empty/invalid; undefined clears it.
+    fallback: number | undefined;
+    onCommit: (val: number | undefined) => void;
+} & Omit<React.ComponentProps<typeof Input>, "value" | "onChange" | "onBlur" | "min" | "max" | "type">) {
+    const [draft, setDraft] = useState<string | null>(null);
+
+    return (
+        <Input
+            type="number"
+            min={min}
+            max={max}
+            value={draft ?? (value === undefined ? "" : String(value))}
+            onChange={(e) => {
+                setDraft(e.target.value);
+                // Propagate unclamped so a transient overshoot isn't frozen at
+                // the cap; blur does the clamping.
+                const parsed = parseInt(e.target.value, 10);
+                onCommit(isNaN(parsed) ? undefined : parsed);
+            }}
+            onBlur={() => {
+                const parsed = parseInt(draft ?? "", 10);
+                onCommit(isNaN(parsed) ? fallback : Math.min(max, Math.max(min, parsed)));
+                setDraft(null);
+            }}
+            {...rest}
+        />
+    );
+}
+
+// Slugs are interpolated straight into booking URLs, so keep them to RFC 3986
+// unreserved characters. Lowercasing and collapsing whitespace alone let through
+// &, ? and #, which truncate or reroute the query string — "q3&sales" becomes
+// event-type=q3 plus a stray "sales" param, silently opening the wrong event.
+//
+// Each *run* of unsafe characters (whitespace included, which subsumes the old
+// \s+ rule) becomes a single "-", so "Q3 & Sales" reads "q3-sales" rather than
+// "q3---sales". Allowed characters — dashes included — are left alone, and
+// nothing is trimmed: trimming would fight you mid-edit, eating the dash in
+// "q3-" before you could type the next word.
+function toSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._~-]+/g, "-");
+}
+
 export function ConfigScreen({ onBack }: { onBack: () => void }) {
     const [config, setConfig] = useState<Config | null>(null);
     const [availableCalendars, setAvailableCalendars] = useState<CalendarInfo[]>([]);
@@ -206,6 +266,30 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return;
         }
 
+        // At least one monitored calendar is required. With none there is nothing
+        // to check for conflicts, so every slot would be offered as free and every
+        // booking would then fail.
+        if (!config.CALENDARS || config.CALENDARS.length === 0) {
+            alert("Please select at least one monitored calendar.");
+            return;
+        }
+
+        // Work hours must describe a real window. start >= end is accepted by the
+        // dropdowns but leaves every slot failing the work-hours filter, so the
+        // picker is permanently and silently empty.
+        if (config.WORKHOURS.start >= config.WORKHOURS.end) {
+            alert("Work hours: the start time must be earlier than the end time.");
+            return;
+        }
+
+        // At least one available day is required. Unchecking every day saves
+        // fine but leaves every slot failing the work-day filter, so the picker
+        // goes silently empty.
+        if (!config.WORKDAYS || config.WORKDAYS.length === 0) {
+            alert("Please select at least one available day.");
+            return;
+        }
+
         // Limit timeslot duration to 24 hours (1440 minutes)
         for (const et of config.EVENT_TYPES) {
             if (et.duration > 1440) {
@@ -214,6 +298,28 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             }
             if (!et.id) {
                 alert("All event types must have a slug/id.");
+                return;
+            }
+            // undefined = inherit the global list; [] = the same fail-open trap.
+            if (et.CALENDARS && et.CALENDARS.length === 0) {
+                alert(`${et.name} must monitor at least one calendar, or reset it to use the global setting.`);
+                return;
+            }
+            // undefined = inherit the global days; [] = the same silent-empty trap.
+            if (et.WORKDAYS && et.WORKDAYS.length === 0) {
+                alert(`${et.name} must have at least one available day, or reset it to use the global setting.`);
+                return;
+            }
+            // Same trap as the global work hours above, per event type.
+            if (et.WORKHOURS && et.WORKHOURS.start >= et.WORKHOURS.end) {
+                alert(`Work hours for ${et.name}: the start time must be earlier than the end time.`);
+                return;
+            }
+            // The 90-day cap is enforced on the global window above; a per-event
+            // override has to respect it too, or it bypasses the cap entirely.
+            if (et.MAX_DAYS_IN_ADVANCE !== undefined &&
+                (!Number.isInteger(et.MAX_DAYS_IN_ADVANCE) || et.MAX_DAYS_IN_ADVANCE < 1 || et.MAX_DAYS_IN_ADVANCE > 90)) {
+                alert(`Scheduling window for ${et.name} must be a whole number between 1 and 90 days.`);
                 return;
             }
             // Validate the per-event minimum-notice override value itself.
@@ -393,21 +499,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                         </div>
                         <div className="flex items-center gap-4 relative">
                             {/* High number of days can make the system slow as it fetches availability for each day */}
-                            <Input
+                            <ClampedNumberInput
                                 id="daysInAdvance"
-                                type="number"
-                                min="1"
-                                max="90"
+                                min={1}
+                                max={90}
+                                fallback={1}
                                 className="w-full pr-12"
                                 value={config.MAX_DAYS_IN_ADVANCE}
-                                onChange={(e) => {
-                                    const val = parseInt(e.target.value, 10);
-                                    if (!isNaN(val)) {
-                                        setConfig({ ...config, MAX_DAYS_IN_ADVANCE: Math.min(90, Math.max(1, val)) });
-                                    } else {
-                                        setConfig({ ...config, MAX_DAYS_IN_ADVANCE: 1 });
-                                    }
-                                }}
+                                onCommit={(val) => setConfig({ ...config, MAX_DAYS_IN_ADVANCE: val ?? 1 })}
                             />
                             <span className="absolute right-3 text-sm text-muted-foreground pointer-events-none">days</span>
                         </div>
@@ -655,7 +754,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                         <Input
                                             id={`slug-${index}`}
                                             value={et.id}
-                                            onChange={(e) => updateEventType(index, { id: e.target.value.replace(/\s+/g, '-').toLowerCase() })}
+                                            onChange={(e) => updateEventType(index, { id: toSlug(e.target.value) })}
                                             placeholder="e.g. 30min"
                                             className={duplicateIds.includes(et.id) ? "border-destructive ring-destructive shadow-[0_0_0_1px_rgba(239,68,68,0.5)]" : ""}
                                         />
@@ -668,17 +767,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </p>
                                         </div>
                                         <div className="relative">
-                                            <Input
+                                            <ClampedNumberInput
                                                 id={`duration-${index}`}
-                                                type="number"
-                                                min="1"
-                                                max="1440"
+                                                min={1}
+                                                max={1440}
+                                                fallback={1}
                                                 className="pr-20"
                                                 value={et.duration}
-                                                onChange={(e) => {
-                                                    const val = parseInt(e.target.value) || 1;
-                                                    updateEventType(index, { duration: Math.min(1440, Math.max(1, val)) });
-                                                }}
+                                                onCommit={(val) => updateEventType(index, { duration: val ?? 1 })}
                                             />
                                             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">minutes</span>
                                         </div>
@@ -715,7 +811,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                             if (et.guestsCanModify) permissions.push('Modify');
                                                             if (et.guestsCanInviteOthers) permissions.push('Invite');
                                                             if (et.guestsCanSeeOtherGuests ?? true) permissions.push('See guests');
-                                                            return permissions.length > 0 ? permissions.join(', ') : 'See guests only';
+                                                            // An empty list means every permission is off — including seeing
+                                                            // guests, so "See guests only" said the exact opposite. (The
+                                                            // default, see-guests-only, already renders as "See guests".)
+                                                            return permissions.length > 0 ? permissions.join(', ') : 'None';
                                                         })()}
                                                     </span>
                                                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -813,7 +912,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             size="sm"
                                             className="h-8"
                                             onClick={() => {
-                                                const url = `${scriptUrl}?event-type=${et.id}`;
+                                                // Encode rather than interpolate raw: a slug saved before
+                                                // toSlug() existed can still hold & or #, and both readers
+                                                // (URLSearchParams and Apps Script's getLocation) decode.
+                                                const url = `${scriptUrl}?event-type=${encodeURIComponent(et.id)}`;
                                                 navigator.clipboard.writeText(url);
                                             }}
                                         >
@@ -843,6 +945,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 </div>
                                                 <Input
                                                     type="number"
+                                                    min="1"
+                                                    max="90"
                                                     placeholder={`Global: ${config.MAX_DAYS_IN_ADVANCE}`}
                                                     value={et.MAX_DAYS_IN_ADVANCE || ""}
                                                     onChange={(e) => updateEventType(index, { MAX_DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}

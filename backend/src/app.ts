@@ -36,39 +36,57 @@ interface EventType {
   visibility?: 'default' | 'public' | 'private';
 }
 
+// Read a JSON script property defensively. Script properties are hand-editable
+// and can hold corrupt or wrong-shaped JSON, and CONFIG below is built once at
+// module load — so a bare JSON.parse that throws takes down *every* entry point,
+// including setConfig. That leaves the app unrepairable from its own UI and only
+// fixable from the Apps Script editor. Fall back to the default whenever the
+// value is missing, unparseable, or the wrong shape.
+function parseProp<T>(name: string, isValid: (value: any) => boolean, fallback: () => T): T {
+  const raw = props.getProperty(name);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (isValid(parsed)) return parsed as T;
+    } catch (e) {
+      // fall through to the default
+    }
+  }
+  return fallback();
+}
+
 const CONFIG = {
   TIME_ZONE: props.getProperty('TIME_ZONE') || "America/New_York",
-  WORKDAYS: JSON.parse(props.getProperty('WORKDAYS') || "[1, 2, 3, 4, 5]"),
-  WORKHOURS: JSON.parse(props.getProperty('WORKHOURS') || '{"start": 9, "end": 16}'),
+  WORKDAYS: parseProp('WORKDAYS', (v) => Array.isArray(v), () => [1, 2, 3, 4, 5]),
+  WORKHOURS: parseProp(
+    'WORKHOURS',
+    (v) => !!v && typeof v.start === 'number' && typeof v.end === 'number',
+    () => ({ start: 9, end: 16 })
+  ),
   MAX_DAYS_IN_ADVANCE: parseInt(props.getProperty('MAX_DAYS_IN_ADVANCE') || "28", 10),
   MIN_DAYS_IN_ADVANCE: parseInt(props.getProperty('MIN_DAYS_IN_ADVANCE') || "0", 10),
-  EVENT_TYPES: (() => {
-    const etProp = props.getProperty('EVENT_TYPES');
-    if (etProp) return JSON.parse(etProp) as EventType[];
-
-    // Migration from legacy TIMESLOT_DURATION
-    const legacyDuration = parseInt(props.getProperty('TIMESLOT_DURATION') || "30", 10);
-    return [{
-      id: "default",
-      name: "Appointment",
-      duration: legacyDuration,
-      selectable: true
-    }] as EventType[];
-  })(),
-  CALENDARS: (() => {
-    const calendarsProp = props.getProperty('CALENDARS');
-    try {
-      if (!calendarsProp) return ["primary"];
-      const parsed = JSON.parse(calendarsProp);
-      return Array.isArray(parsed) ? parsed : ["primary"];
-    } catch (e) {
-      return ["primary"];
+  // An empty list is treated as unusable too: every caller falls back to
+  // CONFIG.EVENT_TYPES[0], which would be undefined.
+  EVENT_TYPES: parseProp<EventType[]>(
+    'EVENT_TYPES',
+    (v) => Array.isArray(v) && v.length > 0,
+    () => {
+      // Migration from legacy TIMESLOT_DURATION
+      const legacyDuration = parseInt(props.getProperty('TIMESLOT_DURATION') || "30", 10);
+      return [{
+        id: "default",
+        name: "Appointment",
+        duration: legacyDuration,
+        selectable: true
+      }];
     }
-  })(),
+  ),
+  CALENDARS: parseProp('CALENDARS', (v) => Array.isArray(v), () => ["primary"]),
   schedulingStrategy: (props.getProperty('schedulingStrategy') || 'collective') as 'collective' | 'round_robin',
   // Fixed host calendar (organizer). '' = no fixed host; the host is then derived
   // from schedulingStrategy as before. Distinct from CALENDARS, which is only the
-  // availability/conflict-check set.
+  // availability/conflict-check set. A plain string property, so it needs no
+  // parseProp (which is only for JSON-valued properties).
   hostCalendar: props.getProperty('hostCalendar') || '',
   // When a fixed host is set, whether the other availability calendars are also
   // invited as attendees (true) or only checked for conflicts (false).
@@ -89,10 +107,11 @@ function isOwner(): boolean {
 
 // Whitelisted per-event fields that are safe to expose to anonymous visitors.
 // Every other EventType field is internal and must never reach the public
-// config: CALENDARS overrides (teammate email addresses), scheduling policy
-// (schedulingStrategy, maxBookings/maxBookingsPeriod), guest permissions, and
-// visibility. Building a fresh object (whitelist) rather than deleting known
-// keys means a newly-added EventType field can't silently leak in the future.
+// config: CALENDARS and hostCalendar overrides (teammate email addresses),
+// scheduling policy (schedulingStrategy, inviteAvailabilityCalendars,
+// maxBookings/maxBookingsPeriod), guest permissions, and visibility. Building a
+// fresh object (whitelist) rather than deleting known keys means a newly-added
+// EventType field can't silently leak in the future.
 function toPublicEventType(et: EventType) {
   return {
     id: et.id,
@@ -121,7 +140,8 @@ function getConfig() {
     // Public projection for anonymous visitors. Returning EVENT_TYPES verbatim
     // leaked per-event CALENDARS (teammate emails) and internal scheduling
     // policy, so project each event type to its public fields and drop the
-    // owner-only top-level policy (CALENDARS, schedulingStrategy).
+    // owner-only top-level policy (CALENDARS, schedulingStrategy, hostCalendar,
+    // inviteAvailabilityCalendars — the host is a calendar address too).
     return {
       TIME_ZONE: config.TIME_ZONE,
       WORKDAYS: config.WORKDAYS,
@@ -139,6 +159,36 @@ function getConfig() {
 function setConfig(newConfig: Partial<typeof CONFIG>) {
   if (!isOwner()) {
     throw new Error("Unauthorized: Only the script owner can update configuration.");
+  }
+
+  // Reject an empty calendar list. With no calendars there is nothing to check
+  // for conflicts, so availability fails *open* (a collective strategy compares
+  // 0 free === 0 queried and offers every work-hour slot) and every booking then
+  // targets an undefined calendar. `[]` is truthy, so the setters below would
+  // otherwise store it happily and report success.
+  if (newConfig.CALENDARS && newConfig.CALENDARS.length === 0) {
+    throw new Error("At least one monitored calendar is required.");
+  }
+  // Likewise an empty work-day list: it stores fine ([] is truthy, and the
+  // loader keeps the "[]" string over its default), then every slot fails the
+  // work-day filter and the picker is silently empty forever.
+  if (newConfig.WORKDAYS && newConfig.WORKDAYS.length === 0) {
+    throw new Error("At least one available day is required.");
+  }
+  if (newConfig.EVENT_TYPES) {
+    for (const et of newConfig.EVENT_TYPES) {
+      // undefined = inherit the global list; [] = the same fail-open trap.
+      if (et.CALENDARS && et.CALENDARS.length === 0) {
+        throw new Error(
+          `Event type "${et.name}" must monitor at least one calendar, or reset it to use the global setting.`
+        );
+      }
+      if (et.WORKDAYS && et.WORKDAYS.length === 0) {
+        throw new Error(
+          `Event type "${et.name}" must have at least one available day, or reset it to use the global setting.`
+        );
+      }
+    }
   }
 
   if (newConfig.TIME_ZONE) props.setProperty('TIME_ZONE', newConfig.TIME_ZONE);
@@ -232,6 +282,13 @@ function periodKey(date: Date, period: BookingPeriod, tz: string): string {
 // calendars. Each booking is tagged (private extended property) on exactly one
 // calendar (organizer/target copy), so summing across calendars does not double
 // count and yields the aggregate for the whole event type.
+//
+// A calendar whose access was revoked (or that was deleted) makes Events.list
+// throw, which would take the whole caller down. Record it in `failedCalendars`
+// and carry on instead. Note this is NOT freebusy's fail-closed situation: an
+// unreadable calendar here means the result is an *undercount*, which is
+// fail-OPEN for the limit — so a caller that enforces the limit must treat a
+// non-empty `failedCalendars` as "cannot verify", not as "no bookings".
 function countBookingsByPeriod(
   calendarIds: string[],
   eventTypeId: string,
@@ -239,32 +296,40 @@ function countBookingsByPeriod(
   timeMax: Date,
   period: BookingPeriod,
   tz: string
-): Record<string, number> {
+): { counts: Record<string, number>; failedCalendars: string[] } {
   const counts: Record<string, number> = {};
+  const failedCalendars: string[] = [];
   calendarIds.forEach((calId) => {
-    let pageToken: string | undefined = undefined;
-    do {
-      const resp: any = Calendar.Events!.list(calId, {
-        privateExtendedProperty: 'somedayEventTypeId=' + eventTypeId,
-        timeMin: timeMin.toISOString(),
-        timeMax: timeMax.toISOString(),
-        singleEvents: true,
-        showDeleted: false,
-        maxResults: 2500,
-        pageToken,
-      });
-      (resp.items || []).forEach((ev: any) => {
-        // Don't let cancelled bookings consume limit slots.
-        if (ev.status === 'cancelled') return;
-        const startStr = ev.start && (ev.start.dateTime || ev.start.date);
-        if (!startStr) return;
-        const key = periodKey(new Date(startStr), period, tz);
-        counts[key] = (counts[key] || 0) + 1;
-      });
-      pageToken = resp.nextPageToken;
-    } while (pageToken);
+    try {
+      let pageToken: string | undefined = undefined;
+      do {
+        const resp: any = Calendar.Events!.list(calId, {
+          privateExtendedProperty: 'somedayEventTypeId=' + eventTypeId,
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
+          singleEvents: true,
+          showDeleted: false,
+          maxResults: 2500,
+          pageToken,
+        });
+        (resp.items || []).forEach((ev: any) => {
+          // Don't let cancelled bookings consume limit slots.
+          if (ev.status === 'cancelled') return;
+          const startStr = ev.start && (ev.start.dateTime || ev.start.date);
+          if (!startStr) return;
+          const key = periodKey(new Date(startStr), period, tz);
+          counts[key] = (counts[key] || 0) + 1;
+        });
+        pageToken = resp.nextPageToken;
+      } while (pageToken);
+    } catch (e) {
+      // Revoked access, deleted calendar, transient API failure. Anything this
+      // calendar contributed is now unknown (and may be partial if it failed
+      // mid-paging), so the caller decides what an unverifiable count means.
+      failedCalendars.push(calId);
+    }
   });
-  return counts;
+  return { counts, failedCalendars };
 }
 
 // UTC instant of `hour:00` local time in `tz`, `days` whole calendar days after
@@ -403,6 +468,14 @@ function fetchAvailability(eventTypeId?: string): {
   const policy = resolveCalendarPolicy(eventType);
   const calendarsToQuery = policy.conflict;
 
+  // No calendars means nothing can be checked for conflicts, so we cannot know
+  // any slot is actually free. Fail closed and offer nothing — otherwise the
+  // collective comparison below (freeCalendarsCount === calendarsToQuery.length)
+  // is 0 === 0 for every slot and the whole work week looks bookable.
+  if (calendarsToQuery.length === 0) {
+    return { timeslots: [], durationMinutes };
+  }
+
   const now = new Date();
   // End of the booking window: local midnight `daysInAdvance` days out, in the
   // configured time zone — the same basis as every other boundary (see
@@ -440,12 +513,19 @@ function fetchAvailability(eventTypeId?: string): {
   // relative to bookTimeslot's padded check. That can only happen if bookings
   // exist beyond the scheduling window; the authoritative check in bookTimeslot
   // still prevents overbooking, so the worst case is a slot shown then rejected.
+  //
+  // Counting is best-effort here: a calendar we can't read (revoked access, say)
+  // is reported in failedCalendars and simply leaves its bookings uncounted, so
+  // a maxed-out period may still show slots. That lands in the same worst case
+  // as the note above — shown, then rejected by the authoritative check in
+  // bookTimeslot — and is far better than one revoked teammate calendar taking
+  // the whole availability page down.
   const limitActive = hasBookingLimit(eventType);
   const countFrom = limitActive
     ? new Date(now.getTime() - periodPaddingMs(eventType.maxBookingsPeriod!))
     : now;
   const bookingCounts = limitActive
-    ? countBookingsByPeriod(calendarsToQuery, eventType.id, countFrom, end, eventType.maxBookingsPeriod!, timeZone)
+    ? countBookingsByPeriod(calendarsToQuery, eventType.id, countFrom, end, eventType.maxBookingsPeriod!, timeZone).counts
     : {};
 
   //get all timeslots between now and end date
@@ -541,6 +621,14 @@ function bookTimeslot(
   const eventType = CONFIG.EVENT_TYPES.find((et: EventType) => et.id === eventTypeId) || CONFIG.EVENT_TYPES[0];
   const durationMinutes = eventType.duration;
   const policy = resolveCalendarPolicy(eventType);
+  // Without a calendar there is nothing to check for conflicts and the collective
+  // check below would pass vacuously (0 free !== 0 used is false), leaving
+  // Events.insert to target an undefined calendar. Fail closed. Tested against
+  // the conflict set, not CALENDARS: a fixed host is always in that set and is
+  // the insert target, so a host with no monitored calendars is still bookable.
+  if (policy.conflict.length === 0) {
+    throw new Error("No calendars are configured for booking");
+  }
   const startTime = new Date(timeslot);
   if (isNaN(startTime.getTime())) {
     throw new Error("Invalid start time");
@@ -590,7 +678,7 @@ function bookTimeslot(
       const tz = CONFIG.TIME_ZONE;
       const period = eventType.maxBookingsPeriod!;
       const padMs = periodPaddingMs(period);
-      const counts = countBookingsByPeriod(
+      const { counts, failedCalendars } = countBookingsByPeriod(
         policy.conflict,
         eventType.id,
         new Date(startTime.getTime() - padMs),
@@ -598,6 +686,14 @@ function bookTimeslot(
         period,
         tz
       );
+      // A calendar we couldn't read may hold bookings for this period, so the
+      // count is an undercount and trusting it could let the limit be exceeded.
+      // This check is the authoritative one, so fail closed instead. (The
+      // availability page tolerates the same failure — it only risks showing a
+      // slot that this check then rejects.)
+      if (failedCalendars.length > 0) {
+        throw new Error("Could not verify the booking limit, please try again");
+      }
       const key = periodKey(startTime, period, tz);
       if ((counts[key] || 0) >= eventType.maxBookings!) {
         throw new Error("Booking limit reached for this period");

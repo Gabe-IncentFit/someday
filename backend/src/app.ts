@@ -292,16 +292,20 @@ function isSlotWithinWindow(startTime: Date, eventType: EventType, now: Date): b
   const dayAnchor = tzHourPlusDays(startTime, timeZone, 0, workHours.start).getTime();
   if (t < dayAnchor) return false;
   if ((t - dayAnchor) % durationMs !== 0) return false;
+  // The whole slot must fit inside the work window — end on/before close, not
+  // just start before it. Checking only the start hour lets a slot spill past
+  // workHours.end (e.g. a 90-min slot starting 16:30 against a 17:00 close).
+  // (t >= dayAnchor above already enforces start >= workHours.start.)
+  const dayClose = tzHourPlusDays(startTime, timeZone, 0, workHours.end).getTime();
+  if (t + durationMs > dayClose) return false;
   // Max days in advance: the whole slot must end on/before the window end —
   // local midnight `daysInAdvance` days out, matching fetchAvailability's `end`.
   const windowEnd = tzMidnightPlusDays(now, timeZone, daysInAdvance).getTime();
   if (t + durationMs > windowEnd) return false;
-  // Work hours / work days in the configured time zone.
+  // Work day in the configured time zone.
   const startTZ = new Date(
     Utilities.formatDate(startTime, timeZone, "yyyy-MM-dd'T'HH:mm:ss")
   );
-  if (startTZ.getHours() < workHours.start) return false;
-  if (startTZ.getHours() >= workHours.end) return false;
   if (workDays.indexOf(startTZ.getDay()) < 0) return false;
   return true;
 }
@@ -401,15 +405,16 @@ function fetchAvailability(eventTypeId?: string): {
   for (let dayOffset = 0; dayOffset <= daysInAdvance + 1; dayOffset++) {
     const dayStart = tzHourPlusDays(now, timeZone, dayOffset, workHours.start);
     if (dayStart.getTime() >= end.getTime()) break;
+    // Work-window close for this local day; slots must end on/before it so none
+    // spills past workHours.end.
+    const dayClose = tzHourPlusDays(now, timeZone, dayOffset, workHours.end).getTime();
 
     for (
       let t = dayStart.getTime();
-      t + durationMs <= end.getTime();
+      t + durationMs <= end.getTime() && t + durationMs <= dayClose;
       t += durationMs
     ) {
       const start = new Date(t);
-      // Stop once this day's work window is over (compare the local hour).
-      if (parseInt(Utilities.formatDate(start, timeZone, "H"), 10) >= workHours.end) break;
       // Enforce the minimum lead time: hide slots earlier than minStart.
       if (t < minStart.getTime()) continue;
       // Per-slot window filters (alignment, past-time, max-days, work

@@ -41,9 +41,15 @@ function App() {
     } else if (selectable.length > 1) {
       setView("event-selector");
     } else {
-      // No selectable events? Show first one anyway or config?
-      setSelectedEventType(data.EVENT_TYPES[0]);
-      setView("calendar");
+      // Nothing is selectable: every type is direct-link-only, so the public
+      // page has nothing to offer. Serving EVENT_TYPES[0] anyway contradicted
+      // the toggle's own promise ("If disabled, this type can only be booked
+      // via direct links") and published a type the owner had deliberately
+      // hidden. Show the empty selector instead — it still carries the owner's
+      // settings gear, which answers the old "or config?" question here.
+      // Direct links are unaffected: they match by id before this runs.
+      setSelectedEventType(null);
+      setView("event-selector");
     }
   };
 

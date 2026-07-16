@@ -742,7 +742,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                             if (et.guestsCanModify) permissions.push('Modify');
                                                             if (et.guestsCanInviteOthers) permissions.push('Invite');
                                                             if (et.guestsCanSeeOtherGuests ?? true) permissions.push('See guests');
-                                                            return permissions.length > 0 ? permissions.join(', ') : 'See guests only';
+                                                            // An empty list means every permission is off — including seeing
+                                                            // guests, so "See guests only" said the exact opposite. (The
+                                                            // default, see-guests-only, already renders as "See guests".)
+                                                            return permissions.length > 0 ? permissions.join(', ') : 'None';
                                                         })()}
                                                     </span>
                                                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />

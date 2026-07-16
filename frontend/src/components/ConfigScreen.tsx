@@ -205,6 +205,14 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return;
         }
 
+        // At least one monitored calendar is required. With none there is nothing
+        // to check for conflicts, so every slot would be offered as free and every
+        // booking would then fail.
+        if (!config.CALENDARS || config.CALENDARS.length === 0) {
+            alert("Please select at least one monitored calendar.");
+            return;
+        }
+
         // Limit timeslot duration to 24 hours (1440 minutes)
         for (const et of config.EVENT_TYPES) {
             if (et.duration > 1440) {
@@ -213,6 +221,11 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             }
             if (!et.id) {
                 alert("All event types must have a slug/id.");
+                return;
+            }
+            // undefined = inherit the global list; [] = the same fail-open trap.
+            if (et.CALENDARS && et.CALENDARS.length === 0) {
+                alert(`${et.name} must monitor at least one calendar, or reset it to use the global setting.`);
                 return;
             }
             // Validate the per-event minimum-notice override value itself.

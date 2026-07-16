@@ -122,6 +122,25 @@ function setConfig(newConfig: Partial<typeof CONFIG>) {
     throw new Error("Unauthorized: Only the script owner can update configuration.");
   }
 
+  // Reject an empty calendar list. With no calendars there is nothing to check
+  // for conflicts, so availability fails *open* (a collective strategy compares
+  // 0 free === 0 queried and offers every work-hour slot) and every booking then
+  // targets an undefined calendar. `[]` is truthy, so the setters below would
+  // otherwise store it happily and report success.
+  if (newConfig.CALENDARS && newConfig.CALENDARS.length === 0) {
+    throw new Error("At least one monitored calendar is required.");
+  }
+  if (newConfig.EVENT_TYPES) {
+    for (const et of newConfig.EVENT_TYPES) {
+      // undefined = inherit the global list; [] = the same fail-open trap.
+      if (et.CALENDARS && et.CALENDARS.length === 0) {
+        throw new Error(
+          `Event type "${et.name}" must monitor at least one calendar, or reset it to use the global setting.`
+        );
+      }
+    }
+  }
+
   if (newConfig.TIME_ZONE) props.setProperty('TIME_ZONE', newConfig.TIME_ZONE);
   if (newConfig.WORKDAYS) props.setProperty('WORKDAYS', JSON.stringify(newConfig.WORKDAYS));
   if (newConfig.WORKHOURS) props.setProperty('WORKHOURS', JSON.stringify(newConfig.WORKHOURS));
@@ -345,6 +364,14 @@ function fetchAvailability(eventTypeId?: string): {
   const minDaysInAdvance = eventType.MIN_DAYS_IN_ADVANCE ?? CONFIG.MIN_DAYS_IN_ADVANCE ?? 0;
   const calendarsToQuery = eventType.CALENDARS ?? CONFIG.CALENDARS;
 
+  // No calendars means nothing can be checked for conflicts, so we cannot know
+  // any slot is actually free. Fail closed and offer nothing — otherwise the
+  // collective comparison below (freeCalendarsCount === calendarsToQuery.length)
+  // is 0 === 0 for every slot and the whole work week looks bookable.
+  if (calendarsToQuery.length === 0) {
+    return { timeslots: [], durationMinutes };
+  }
+
   const now = new Date();
   // End of the booking window: local midnight `daysInAdvance` days out, in the
   // configured time zone — the same basis as every other boundary (see
@@ -484,6 +511,12 @@ function bookTimeslot(
   const eventType = CONFIG.EVENT_TYPES.find((et: EventType) => et.id === eventTypeId) || CONFIG.EVENT_TYPES[0];
   const durationMinutes = eventType.duration;
   const calendarsToUse = eventType.CALENDARS ?? CONFIG.CALENDARS;
+  // Without a calendar there is nothing to check for conflicts and the collective
+  // check below would pass vacuously (0 free !== 0 used is false), leaving
+  // Events.insert to target an undefined calendar. Fail closed.
+  if (calendarsToUse.length === 0) {
+    throw new Error("No calendars are configured for booking");
+  }
   const startTime = new Date(timeslot);
   if (isNaN(startTime.getTime())) {
     throw new Error("Invalid start time");

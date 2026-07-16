@@ -70,6 +70,22 @@ function isOwner(): boolean {
   }
 }
 
+// Whitelisted per-event fields that are safe to expose to anonymous visitors.
+// Every other EventType field is internal and must never reach the public
+// config: CALENDARS overrides (teammate email addresses), scheduling policy
+// (schedulingStrategy, maxBookings/maxBookingsPeriod), guest permissions, and
+// visibility. Building a fresh object (whitelist) rather than deleting known
+// keys means a newly-added EventType field can't silently leak in the future.
+function toPublicEventType(et: EventType) {
+  return {
+    id: et.id,
+    name: et.name,
+    duration: et.duration,
+    selectable: et.selectable,
+    description: et.description,
+  };
+}
+
 function getConfig() {
   const config = {
     TIME_ZONE: CONFIG.TIME_ZONE,
@@ -83,8 +99,19 @@ function getConfig() {
   };
 
   if (!isOwner()) {
-    // Return safe public config for visitors
-    return { ...config, CALENDARS: [] };
+    // Public projection for anonymous visitors. Returning EVENT_TYPES verbatim
+    // leaked per-event CALENDARS (teammate emails) and internal scheduling
+    // policy, so project each event type to its public fields and drop the
+    // owner-only top-level policy (CALENDARS, schedulingStrategy).
+    return {
+      TIME_ZONE: config.TIME_ZONE,
+      WORKDAYS: config.WORKDAYS,
+      WORKHOURS: config.WORKHOURS,
+      MAX_DAYS_IN_ADVANCE: config.MAX_DAYS_IN_ADVANCE,
+      MIN_DAYS_IN_ADVANCE: config.MIN_DAYS_IN_ADVANCE,
+      EVENT_TYPES: config.EVENT_TYPES.map(toPublicEventType),
+      CALENDARS: [],
+    };
   }
 
   return config;

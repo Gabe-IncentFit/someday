@@ -26,35 +26,52 @@ interface EventType {
   visibility?: 'default' | 'public' | 'private';
 }
 
+// Read a JSON script property defensively. Script properties are hand-editable
+// and can hold corrupt or wrong-shaped JSON, and CONFIG below is built once at
+// module load — so a bare JSON.parse that throws takes down *every* entry point,
+// including setConfig. That leaves the app unrepairable from its own UI and only
+// fixable from the Apps Script editor. Fall back to the default whenever the
+// value is missing, unparseable, or the wrong shape.
+function parseProp<T>(name: string, isValid: (value: any) => boolean, fallback: () => T): T {
+  const raw = props.getProperty(name);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (isValid(parsed)) return parsed as T;
+    } catch (e) {
+      // fall through to the default
+    }
+  }
+  return fallback();
+}
+
 const CONFIG = {
   TIME_ZONE: props.getProperty('TIME_ZONE') || "America/New_York",
-  WORKDAYS: JSON.parse(props.getProperty('WORKDAYS') || "[1, 2, 3, 4, 5]"),
-  WORKHOURS: JSON.parse(props.getProperty('WORKHOURS') || '{"start": 9, "end": 16}'),
+  WORKDAYS: parseProp('WORKDAYS', (v) => Array.isArray(v), () => [1, 2, 3, 4, 5]),
+  WORKHOURS: parseProp(
+    'WORKHOURS',
+    (v) => !!v && typeof v.start === 'number' && typeof v.end === 'number',
+    () => ({ start: 9, end: 16 })
+  ),
   MAX_DAYS_IN_ADVANCE: parseInt(props.getProperty('MAX_DAYS_IN_ADVANCE') || "28", 10),
   MIN_DAYS_IN_ADVANCE: parseInt(props.getProperty('MIN_DAYS_IN_ADVANCE') || "0", 10),
-  EVENT_TYPES: (() => {
-    const etProp = props.getProperty('EVENT_TYPES');
-    if (etProp) return JSON.parse(etProp) as EventType[];
-
-    // Migration from legacy TIMESLOT_DURATION
-    const legacyDuration = parseInt(props.getProperty('TIMESLOT_DURATION') || "30", 10);
-    return [{
-      id: "default",
-      name: "Appointment",
-      duration: legacyDuration,
-      selectable: true
-    }] as EventType[];
-  })(),
-  CALENDARS: (() => {
-    const calendarsProp = props.getProperty('CALENDARS');
-    try {
-      if (!calendarsProp) return ["primary"];
-      const parsed = JSON.parse(calendarsProp);
-      return Array.isArray(parsed) ? parsed : ["primary"];
-    } catch (e) {
-      return ["primary"];
+  // An empty list is treated as unusable too: every caller falls back to
+  // CONFIG.EVENT_TYPES[0], which would be undefined.
+  EVENT_TYPES: parseProp<EventType[]>(
+    'EVENT_TYPES',
+    (v) => Array.isArray(v) && v.length > 0,
+    () => {
+      // Migration from legacy TIMESLOT_DURATION
+      const legacyDuration = parseInt(props.getProperty('TIMESLOT_DURATION') || "30", 10);
+      return [{
+        id: "default",
+        name: "Appointment",
+        duration: legacyDuration,
+        selectable: true
+      }];
     }
-  })(),
+  ),
+  CALENDARS: parseProp('CALENDARS', (v) => Array.isArray(v), () => ["primary"]),
   schedulingStrategy: (props.getProperty('schedulingStrategy') || 'collective') as 'collective' | 'round_robin'
 };
 

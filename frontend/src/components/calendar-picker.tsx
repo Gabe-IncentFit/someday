@@ -250,7 +250,11 @@ export function CalendarPicker({
         <CardFooter className="flex justify-between">
           <When condition={showForm}>
             <Show>
-              <Button variant="outline" onClick={onBack || handleBack}>
+              {/* Back out of the contact form to the time picker. Falling back to
+                  onBack here jumped clear out to the event-type selector (it's
+                  set whenever there's more than one type), losing the form. The
+                  picker view below has its own onBack button for that. */}
+              <Button variant="outline" onClick={handleBack}>
                 <ArrowLeft className="mr-2 h-4 w-4" />
                 Back
               </Button>

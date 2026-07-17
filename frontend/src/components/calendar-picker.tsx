@@ -172,10 +172,14 @@ export function CalendarPicker({
       <Card className="w-full max-w-[600px] mx-auto min-h-[400px] space-y-4 relative">
         <When condition={slotsStatus === "pending"}>
           <Show>
-            <div className="bg-primary absolute rounded-xl z-50 opacity-70 inset-0">
-              <div className="flex justify-center items-center h-full flex-col stroke-primary-foreground">
+            {/* A veil, not a brand surface: this used to be bg-primary, which
+                read as a neutral scrim only while --primary happened to be
+                near-black. A host setting its own brand turned the whole card
+                that colour. */}
+            <div className="bg-background absolute rounded-xl z-50 opacity-70 inset-0">
+              <div className="flex justify-center items-center h-full flex-col stroke-foreground">
                 <Loader2 size={60} className="animate-spin" stroke="current" />
-                <p className="text-lg font-semibold text-primary-foreground">
+                <p className="text-lg font-semibold text-foreground">
                   Loading...
                 </p>
               </div>

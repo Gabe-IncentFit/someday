@@ -14,6 +14,7 @@ import "./index.css";
 import { GoogleLib } from "@/lib/googlelib";
 import {
   applyEmbedClass,
+  applyHostStyling,
   EmbedOptions,
   parseEmbedOptions,
   reportHeightToHost,
@@ -151,9 +152,10 @@ function App() {
 
   useEffect(() => {
     applyEmbedClass(embed.embedded);
+    applyHostStyling(embed);
     if (!embed.embedded) return;
     return reportHeightToHost();
-  }, [embed.embedded]);
+  }, [embed]);
 
   if (loading) {
     return (

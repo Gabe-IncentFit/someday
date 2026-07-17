@@ -153,7 +153,7 @@ export function CalendarPicker({
         confirm={resetBookGoogle}
       />
 
-      <Card className="sm:w-[600px] mx-auto min-h-[400px] space-y-4 relative">
+      <Card className="w-full sm:w-[600px] mx-auto min-h-[400px] space-y-4 relative">
         <When condition={slotsStatus === "pending"}>
           <Show>
             <div className="bg-primary absolute rounded-xl z-50 opacity-70 inset-0">
@@ -187,10 +187,13 @@ export function CalendarPicker({
         <When condition={!showForm}>
           <Show>
             <CardHeader className="max-w-full">
-              <div className="flex justify-between items-center sm:items-start flex-col sm:flex-row gap-4 relative">
+              {/* Wrapping (not a breakpoint) decides the timezone's place: it
+                  sits top-right beside a title that leaves room, and drops to
+                  its own line when the title needs the width. */}
+              <div className="flex flex-wrap justify-between items-start gap-x-4 gap-y-3 relative">
                 <CardTitle className="max-w-full">
                   <div className="flex flex-col gap-1.5">
-                    <div className="text-2xl font-bold whitespace-nowrap overflow-ellipsis overflow-hidden">
+                    <div className="text-2xl font-bold break-words">
                       {eventType?.name || "Appointment Scheduler"}
                     </div>
                     <div className="flex items-center gap-1.5 text-sm font-normal text-muted-foreground">
@@ -200,8 +203,8 @@ export function CalendarPicker({
                   </div>
                 </CardTitle>
 
-                <div className="flex items-center gap-2 sm:pt-1">
-                  <Label className="text-sm text-muted-foreground">
+                <div className="flex items-center gap-2 shrink-0">
+                  <Label className="text-sm text-muted-foreground whitespace-nowrap">
                     Your Timezone
                   </Label>
                   <TimezoneDropdown />

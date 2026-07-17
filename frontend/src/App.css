@@ -2,6 +2,9 @@
   max-width: 1280px;
   margin: 0 auto;
   padding: 2rem;
+  /* Flex item of a flex body: min-width defaults to auto, which lets wide
+     content push #root past the viewport instead of shrinking to it. */
+  min-width: 0;
 }
 
 .logo {

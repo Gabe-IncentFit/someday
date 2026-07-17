@@ -12,10 +12,18 @@ import "./App.css";
 import "./index.css";
 
 import { GoogleLib } from "@/lib/googlelib";
+import {
+  applyEmbedClass,
+  EmbedOptions,
+  parseEmbedOptions,
+  reportHeightToHost,
+} from "@/lib/embed";
 
 function LoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen gap-4 p-6 text-center">
+    // Sized in px, not vh: when embedded, the frame's height is derived from
+    // this content, so a vh-based height would measure itself in a loop.
+    <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 p-6 text-center">
       <h2 className="text-lg font-semibold">Couldn't load the scheduler</h2>
       <p className="text-sm text-muted-foreground max-w-sm">{message}</p>
       <Button onClick={onRetry}>Try again</Button>
@@ -32,6 +40,7 @@ function App() {
   const [initError, setInitError] = useState<Error | null>(null);
   // Bumped by the retry button to re-run the init effect.
   const [retryCount, setRetryCount] = useState(0);
+  const [embed, setEmbed] = useState<EmbedOptions>({ embedded: false });
 
   const determineInitialView = (data: Config) => {
     const selectable = data.EVENT_TYPES.filter(et => et.selectable);
@@ -101,10 +110,12 @@ function App() {
           });
           page = location.parameter["page"];
           eventTypeId = location.parameter["event-type"];
+          setEmbed(parseEmbedOptions(location.parameter));
         } else {
           const params = new URLSearchParams(window.location.search);
           page = params.get("page");
           eventTypeId = params.get("event-type");
+          setEmbed(parseEmbedOptions(params));
         }
 
         if (page === "config" && owner) {
@@ -138,9 +149,15 @@ function App() {
     fetchData();
   }, [retryCount]);
 
+  useEffect(() => {
+    applyEmbedClass(embed.embedded);
+    if (!embed.embedded) return;
+    return reportHeightToHost();
+  }, [embed.embedded]);
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
+      <div className="flex items-center justify-center min-h-[400px]">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
       </div>
     );
@@ -150,7 +167,7 @@ function App() {
 
   if (initError) {
     return (
-      <ThemeProvider>
+      <ThemeProvider forcedTheme={embed.theme}>
         <LoadFailure message={initError.message} onRetry={retryInit} />
       </ThemeProvider>
     );
@@ -170,7 +187,7 @@ function App() {
   };
 
   return (
-    <ThemeProvider>
+    <ThemeProvider forcedTheme={embed.theme}>
       <DemoBanner show={isDemoMode} />
       <div className="relative">
         {view === "config" ? (
@@ -189,6 +206,8 @@ function App() {
             onOpenConfig={isOwner ? () => setView("config") : undefined}
             eventType={selectedEventType}
             onBack={config && config.EVENT_TYPES.filter(et => et.selectable).length > 1 ? handleBackToSelector : undefined}
+            showThemeToggle={!embed.embedded}
+            embedded={embed.embedded}
           />
         ) : (
           // No usable event type: rendering the picker anyway (via

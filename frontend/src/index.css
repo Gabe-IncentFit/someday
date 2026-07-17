@@ -34,6 +34,25 @@ body {
   min-height: 100vh;
 }
 
+/* Embedded in a host page (?embed=1). These rules are deliberately unlayered:
+   the opaque background they undo comes from Tailwind's `base` layer, and any
+   unlayered rule outranks a layered one regardless of specificity.
+
+   Sizing to content is what makes iframe auto-height possible at all — while
+   `min-height: 100vh` stands, content can never measure shorter than the frame
+   it is in. `min-width` goes for the same reason: a 320px floor overflows a
+   narrower frame, which is how the embed gets a horizontal scrollbar. */
+html.embedded,
+html.embedded body {
+  background: transparent;
+}
+
+html.embedded body {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+}
+
 h1 {
   font-size: 3.2em;
   line-height: 1.1;

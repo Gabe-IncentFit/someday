@@ -6,7 +6,28 @@ type ThemeProviderProps = {
   children: React.ReactNode;
   defaultTheme?: Theme;
   storageKey?: string;
+  /** Pins the theme and ignores stored preference, for hosts that embed us. */
+  forcedTheme?: Theme;
 };
+
+// Storage access is not guaranteed: a cross-origin iframe with third-party
+// storage blocked (Safari's default) throws on touching localStorage rather
+// than returning null, which would take the whole app down at mount.
+function readStoredTheme(storageKey: string): Theme | null {
+  try {
+    return localStorage.getItem(storageKey) as Theme | null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredTheme(storageKey: string, theme: Theme) {
+  try {
+    localStorage.setItem(storageKey, theme);
+  } catch {
+    // Preference just won't persist; not worth failing the interaction over.
+  }
+}
 
 type ThemeProviderState = {
   theme: Theme;
@@ -24,11 +45,14 @@ export function ThemeProvider({
   children,
   defaultTheme = "system",
   storageKey = "vite-ui-theme",
+  forcedTheme,
   ...props
 }: ThemeProviderProps) {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem(storageKey) as Theme) || defaultTheme
+  const [storedTheme, setStoredTheme] = useState<Theme>(
+    () => readStoredTheme(storageKey) || defaultTheme
   );
+  const theme = forcedTheme ?? storedTheme;
+  const setTheme = setStoredTheme;
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -69,7 +93,7 @@ export function ThemeProvider({
   const value = {
     theme,
     setTheme: (theme: Theme) => {
-      localStorage.setItem(storageKey, theme);
+      writeStoredTheme(storageKey, theme);
       setTheme(theme);
     },
   };

@@ -217,6 +217,37 @@ function listCalendars() {
   }));
 }
 
+// Reports which of `calendarIds` this script can actually read free/busy for.
+//
+// Availability fails closed: a calendar whose freebusy can't be trusted counts
+// as busy, so a single unreadable calendar in a collective set (or a fixed host,
+// which forces collective semantics) silently empties the entire calendar. The
+// owner sees an unbookable page and nothing explaining it.
+//
+// Membership in listCalendars() is the wrong test — that's the owner's calendar
+// list, and a colleague's calendar is usually readable without being on it. So
+// this asks the same question fetchAvailability does, through the same freebusy
+// call and the same freebusyIntervals predicate, and cannot drift from it.
+function checkCalendarAccess(calendarIds: string[]): { id: string; readable: boolean }[] {
+  if (!isOwner()) {
+    throw new Error("Unauthorized: Only the script owner can check calendar access.");
+  }
+  const ids = (calendarIds || []).filter((id) => !!id);
+  if (ids.length === 0) return [];
+
+  const now = new Date();
+  const response = Calendar.Freebusy!.query({
+    timeMin: now.toISOString(),
+    timeMax: new Date(now.getTime() + 60000).toISOString(),
+    items: ids.map((id: string) => ({ id })),
+  });
+
+  return ids.map((id: string) => ({
+    id,
+    readable: freebusyIntervals(response, id) !== null,
+  }));
+}
+
 function getScriptUrl(): string {
   return ScriptApp.getService().getUrl();
 }

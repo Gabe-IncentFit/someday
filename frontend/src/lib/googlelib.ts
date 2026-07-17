@@ -60,6 +60,15 @@ export const GoogleLib = {
                     { id: "primary", name: "Primary Calendar" }
                   ]);
                 },
+                checkCalendarAccess: (calendarIds: string[]) => {
+                  // Stands in for the freebusy probe: anything not obviously
+                  // ours reads as unreachable, so the warning can be exercised
+                  // in dev by adding any other address.
+                  cb((calendarIds || []).map((id) => ({
+                    id,
+                    readable: id === "primary" || id.endsWith("@example.com"),
+                  })));
+                },
                 setConfig: (config: any) => {
                   console.log("Saving config", config);
                   cb({ success: true });

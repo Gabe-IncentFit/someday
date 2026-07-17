@@ -9,7 +9,8 @@ import {
     ChevronsUpDown,
     ChevronDown,
     ChevronUp,
-    Trash2
+    Trash2,
+    TriangleAlert
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -152,9 +153,36 @@ function toSlug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9._~-]+/g, "-");
 }
 
+// Availability fails closed: a calendar the script cannot read free/busy for
+// counts as busy rather than raising anything, so one unreadable calendar in a
+// collective set — or a fixed host, which forces collective semantics — quietly
+// empties the whole booking page. That is invisible from here otherwise, since a
+// calendar can be picked by typing any address.
+function CalendarAccessWarning({
+    ids,
+    unreachable,
+}: {
+    ids: (string | undefined)[];
+    unreachable: Set<string>;
+}) {
+    const blocked = ids.filter((id): id is string => !!id && unreachable.has(id));
+    if (blocked.length === 0) return null;
+    return (
+        <p className="flex items-start gap-1.5 pt-1 text-xs text-destructive">
+            <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-px" />
+            <span>
+                No free/busy access to {blocked.join(", ")}. Calendars that can't be
+                read count as busy, which hides every slot. Share with this account —
+                use "Make changes to events", which booking needs too.
+            </span>
+        </p>
+    );
+}
+
 export function ConfigScreen({ onBack }: { onBack: () => void }) {
     const [config, setConfig] = useState<Config | null>(null);
     const [availableCalendars, setAvailableCalendars] = useState<CalendarInfo[]>([]);
+    const [unreachableCalendars, setUnreachableCalendars] = useState<Set<string>>(new Set());
     const [scriptUrl, setScriptUrl] = useState<string>("");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -169,6 +197,46 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
         }
     }, []);
+
+    // Every calendar the config actually depends on, global and per-event-type.
+    const referencedCalendarIds = useMemo(() => {
+        if (!config) return [];
+        const ids = new Set<string>();
+        (config.CALENDARS ?? []).forEach((id) => ids.add(id));
+        if (config.hostCalendar) ids.add(config.hostCalendar);
+        (config.EVENT_TYPES ?? []).forEach((et) => {
+            (et.CALENDARS ?? []).forEach((id) => ids.add(id));
+            if (et.hostCalendar) ids.add(et.hostCalendar);
+        });
+        return [...ids].filter(Boolean);
+    }, [config]);
+
+    const referencedCalendarKey = referencedCalendarIds.join("|");
+
+    useEffect(() => {
+        if (referencedCalendarIds.length === 0) {
+            setUnreachableCalendars(new Set());
+            return;
+        }
+        let cancelled = false;
+        GoogleLib.google.script.run
+            .withSuccessHandler((results: { id: string; readable: boolean }[]) => {
+                if (cancelled) return;
+                setUnreachableCalendars(
+                    new Set((results || []).filter((r) => !r.readable).map((r) => r.id))
+                );
+            })
+            .withFailureHandler(() => {
+                // Leave the last known state alone: a probe that failed to run is
+                // not evidence that a calendar is unreadable, and inventing a
+                // warning here would be worse than staying quiet.
+            })
+            .checkCalendarAccess(referencedCalendarIds);
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [referencedCalendarKey]);
 
     const duplicateIds = useMemo(() => {
         if (!config?.EVENT_TYPES) return [];
@@ -620,6 +688,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                             available={availableCalendars}
                             onChange={(vals) => setConfig({ ...config, CALENDARS: vals })}
                         />
+                        <CalendarAccessWarning ids={config.CALENDARS} unreachable={unreachableCalendars} />
                     </div>
 
                     {/* Global Scheduling Strategy */}
@@ -681,6 +750,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                             noneLabel="No fixed host (use strategy)"
                             onChange={(val) => setConfig({ ...config, hostCalendar: val })}
                         />
+                        <CalendarAccessWarning ids={[config.hostCalendar]} unreachable={unreachableCalendars} />
                     </div>
 
                     {/* Only relevant once a fixed host is chosen. */}
@@ -1136,6 +1206,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     placeholder={et.CALENDARS === undefined ? "Using global settings" : "Select calendars..."}
                                                     onChange={(vals) => updateEventType(index, { CALENDARS: vals })}
                                                 />
+                                                <CalendarAccessWarning
+                                                    ids={et.CALENDARS ?? config.CALENDARS}
+                                                    unreachable={unreachableCalendars}
+                                                />
                                                 {et.CALENDARS !== undefined && (
                                                     <Button
                                                         variant="link"
@@ -1236,6 +1310,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     placeholder={et.hostCalendar === undefined ? "Using global settings" : "No fixed host (use strategy)"}
                                                     noneLabel="No fixed host (use strategy)"
                                                     onChange={(val) => updateEventType(index, { hostCalendar: val })}
+                                                />
+                                                <CalendarAccessWarning
+                                                    ids={[et.hostCalendar ?? config.hostCalendar]}
+                                                    unreachable={unreachableCalendars}
                                                 />
                                                 {(et.hostCalendar ?? config.hostCalendar ?? "") !== "" && (
                                                     <div className="flex items-center gap-3 pt-1">

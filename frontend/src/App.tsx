@@ -7,6 +7,7 @@ import { ConfigScreen } from "@/components/ConfigScreen";
 import { Config, EventType } from "@/models/EventType";
 import { EventTypeSelector } from "@/components/EventTypeSelector";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Loader2 } from "lucide-react";
 import "./App.css";
 import "./index.css";
@@ -22,13 +23,15 @@ import {
 
 function LoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
+    // Carries a card for the same reason the other states do: this is the whole
+    // widget when it renders, and bare text has no surface of its own to sit on.
     // Sized in px, not vh: when embedded, the frame's height is derived from
     // this content, so a vh-based height would measure itself in a loop.
-    <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 p-6 text-center">
+    <Card className="w-full max-w-[600px] mx-auto min-h-[400px] flex flex-col items-center justify-center gap-4 p-6 text-center">
       <h2 className="text-lg font-semibold">Couldn't load the scheduler</h2>
       <p className="text-sm text-muted-foreground max-w-sm">{message}</p>
       <Button onClick={onRetry}>Try again</Button>
-    </div>
+    </Card>
   );
 }
 

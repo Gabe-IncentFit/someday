@@ -41,6 +41,11 @@ export function ThemeProvider({
         ? "dark"
         : "light";
 
+      // Apply the current system theme immediately so a dark-mode OS doesn't get
+      // a light first paint. (This previously sat after the cleanup return below,
+      // so it was dead code and the class only got set once the OS theme changed.)
+      root.classList.add(systemTheme);
+
       const handleSystemThemeChange = (e: MediaQueryListEvent) => {
         const newSystemTheme = e.matches ? "dark" : "light";
         root.classList.remove("light", "dark");
@@ -56,9 +61,6 @@ export function ThemeProvider({
           .matchMedia("(prefers-color-scheme: dark)")
           .removeEventListener("change", handleSystemThemeChange);
       };
-
-      root.classList.add(systemTheme);
-      return;
     }
 
     root.classList.add(theme);

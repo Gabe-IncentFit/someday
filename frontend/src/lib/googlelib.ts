@@ -15,7 +15,7 @@ const MOCK_EVENT_TYPES = [
     name: "1 Hour Strategy",
     duration: 60,
     selectable: true,
-    DAYS_IN_ADVANCE: 14,
+    MAX_DAYS_IN_ADVANCE: 14,
     CALENDARS: ["work"]
   },
   { id: "secret", name: "Secret Meeting", duration: 15, selectable: false },
@@ -50,7 +50,7 @@ export const GoogleLib = {
                     TIME_ZONE: "America/New_York",
                     WORKDAYS: [1, 2, 3, 4, 5],
                     WORKHOURS: { start: 9, end: 16 },
-                    DAYS_IN_ADVANCE: 28,
+                    MAX_DAYS_IN_ADVANCE: 28,
                     EVENT_TYPES: MOCK_EVENT_TYPES,
                     CALENDARS: ["primary"],
                   });

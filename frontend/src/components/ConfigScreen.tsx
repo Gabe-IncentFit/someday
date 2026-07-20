@@ -35,6 +35,7 @@ import {
 import { Switch } from "./ui/switch";
 import { GoogleLib } from "@/lib/googlelib";
 import { CalendarMultiSelect } from "./CalendarMultiSelect";
+import { CalendarSingleSelect } from "./CalendarSingleSelect";
 
 import { Config, EventType } from "@/models/EventType";
 
@@ -89,6 +90,66 @@ function TimeDropdown({ value, onChange, placeholder }: { value?: number; onChan
             </DropdownMenuContent>
         </DropdownMenu>
     );
+}
+
+// A number input that doesn't fight you mid-edit. Clamping on every keystroke
+// silently mangles input: with a NaN fallback re-filling the box, clearing "28"
+// and typing "45" goes ""->1->"14"->"145", and the clamp freezes that at the
+// max (90). Keep the raw text in local state while editing and only clamp on
+// blur; the field is free to be empty in between. Save-time validation still
+// has the final say.
+function ClampedNumberInput({
+    value,
+    min,
+    max,
+    fallback,
+    onCommit,
+    ...rest
+}: {
+    value: number | undefined;
+    min: number;
+    max: number;
+    // Value to commit when the field is left empty/invalid; undefined clears it.
+    fallback: number | undefined;
+    onCommit: (val: number | undefined) => void;
+} & Omit<React.ComponentProps<typeof Input>, "value" | "onChange" | "onBlur" | "min" | "max" | "type">) {
+    const [draft, setDraft] = useState<string | null>(null);
+
+    return (
+        <Input
+            type="number"
+            min={min}
+            max={max}
+            value={draft ?? (value === undefined ? "" : String(value))}
+            onChange={(e) => {
+                setDraft(e.target.value);
+                // Propagate unclamped so a transient overshoot isn't frozen at
+                // the cap; blur does the clamping.
+                const parsed = parseInt(e.target.value, 10);
+                onCommit(isNaN(parsed) ? undefined : parsed);
+            }}
+            onBlur={() => {
+                const parsed = parseInt(draft ?? "", 10);
+                onCommit(isNaN(parsed) ? fallback : Math.min(max, Math.max(min, parsed)));
+                setDraft(null);
+            }}
+            {...rest}
+        />
+    );
+}
+
+// Slugs are interpolated straight into booking URLs, so keep them to RFC 3986
+// unreserved characters. Lowercasing and collapsing whitespace alone let through
+// &, ? and #, which truncate or reroute the query string — "q3&sales" becomes
+// event-type=q3 plus a stray "sales" param, silently opening the wrong event.
+//
+// Each *run* of unsafe characters (whitespace included, which subsumes the old
+// \s+ rule) becomes a single "-", so "Q3 & Sales" reads "q3-sales" rather than
+// "q3---sales". Allowed characters — dashes included — are left alone, and
+// nothing is trimmed: trimming would fight you mid-edit, eating the dash in
+// "q3-" before you could type the next word.
+function toSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._~-]+/g, "-");
 }
 
 export function ConfigScreen({ onBack }: { onBack: () => void }) {
@@ -162,7 +223,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                         TIME_ZONE: "America/New_York",
                         WORKDAYS: [1, 2, 3, 4, 5],
                         WORKHOURS: { start: 9, end: 16 },
-                        DAYS_IN_ADVANCE: 28,
+                        MAX_DAYS_IN_ADVANCE: 28,
                         EVENT_TYPES: [
                             { id: "30min", name: "30 Minute Meeting", duration: 30, selectable: true },
                             { id: "60min", name: "1 Hour Strategy", duration: 60, selectable: true },
@@ -188,8 +249,44 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
 
         // Enforce maximum 90 days for scheduling window
         // Higher numbers can make the system slow due to increased calendar fetching overhead
-        if (config.DAYS_IN_ADVANCE > 90) {
+        if (config.MAX_DAYS_IN_ADVANCE > 90) {
             alert("Scheduling window cannot exceed 90 days.");
+            return;
+        }
+
+        // Minimum notice must fit inside the scheduling window, otherwise no
+        // slots would ever be bookable.
+        const globalMinDays = config.MIN_DAYS_IN_ADVANCE ?? 0;
+        if (globalMinDays < 0) {
+            alert("Minimum notice cannot be negative.");
+            return;
+        }
+        if (globalMinDays >= config.MAX_DAYS_IN_ADVANCE) {
+            alert("Minimum notice must be less than the scheduling window.");
+            return;
+        }
+
+        // At least one monitored calendar is required. With none there is nothing
+        // to check for conflicts, so every slot would be offered as free and every
+        // booking would then fail.
+        if (!config.CALENDARS || config.CALENDARS.length === 0) {
+            alert("Please select at least one monitored calendar.");
+            return;
+        }
+
+        // Work hours must describe a real window. start >= end is accepted by the
+        // dropdowns but leaves every slot failing the work-hours filter, so the
+        // picker is permanently and silently empty.
+        if (config.WORKHOURS.start >= config.WORKHOURS.end) {
+            alert("Work hours: the start time must be earlier than the end time.");
+            return;
+        }
+
+        // At least one available day is required. Unchecking every day saves
+        // fine but leaves every slot failing the work-day filter, so the picker
+        // goes silently empty.
+        if (!config.WORKDAYS || config.WORKDAYS.length === 0) {
+            alert("Please select at least one available day.");
             return;
         }
 
@@ -202,6 +299,54 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             if (!et.id) {
                 alert("All event types must have a slug/id.");
                 return;
+            }
+            // undefined = inherit the global list; [] = the same fail-open trap.
+            if (et.CALENDARS && et.CALENDARS.length === 0) {
+                alert(`${et.name} must monitor at least one calendar, or reset it to use the global setting.`);
+                return;
+            }
+            // undefined = inherit the global days; [] = the same silent-empty trap.
+            if (et.WORKDAYS && et.WORKDAYS.length === 0) {
+                alert(`${et.name} must have at least one available day, or reset it to use the global setting.`);
+                return;
+            }
+            // Same trap as the global work hours above, per event type.
+            if (et.WORKHOURS && et.WORKHOURS.start >= et.WORKHOURS.end) {
+                alert(`Work hours for ${et.name}: the start time must be earlier than the end time.`);
+                return;
+            }
+            // The 90-day cap is enforced on the global window above; a per-event
+            // override has to respect it too, or it bypasses the cap entirely.
+            if (et.MAX_DAYS_IN_ADVANCE !== undefined &&
+                (!Number.isInteger(et.MAX_DAYS_IN_ADVANCE) || et.MAX_DAYS_IN_ADVANCE < 1 || et.MAX_DAYS_IN_ADVANCE > 90)) {
+                alert(`Scheduling window for ${et.name} must be a whole number between 1 and 90 days.`);
+                return;
+            }
+            // Validate the per-event minimum-notice override value itself.
+            if (et.MIN_DAYS_IN_ADVANCE !== undefined &&
+                (!Number.isInteger(et.MIN_DAYS_IN_ADVANCE) || et.MIN_DAYS_IN_ADVANCE < 0)) {
+                alert(`Minimum notice for ${et.name} must be a non-negative whole number.`);
+                return;
+            }
+            // The effective minimum notice must fit inside the effective window
+            // so the event still has bookable slots. Check this whichever of the
+            // two the event overrides — an event that overrides only the window
+            // can still inherit a larger global minimum.
+            const effectiveMin = et.MIN_DAYS_IN_ADVANCE ?? globalMinDays;
+            const effectiveMax = et.MAX_DAYS_IN_ADVANCE ?? config.MAX_DAYS_IN_ADVANCE;
+            if (effectiveMin >= effectiveMax) {
+                alert(`Minimum notice for ${et.name} (${effectiveMin} days) must be less than its scheduling window (${effectiveMax} days).`);
+                return;
+            }
+            if (et.maxBookings !== undefined) {
+                if (!Number.isInteger(et.maxBookings) || et.maxBookings < 1) {
+                    alert(`Max bookings for ${et.name} must be a positive whole number.`);
+                    return;
+                }
+                if (!['day', 'week', 'month', 'quarter', 'year'].includes(et.maxBookingsPeriod ?? '')) {
+                    alert(`Please select a period (day, week, month, quarter, or year) for the ${et.name} booking limit.`);
+                    return;
+                }
             }
         }
 
@@ -354,20 +499,38 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                         </div>
                         <div className="flex items-center gap-4 relative">
                             {/* High number of days can make the system slow as it fetches availability for each day */}
-                            <Input
+                            <ClampedNumberInput
                                 id="daysInAdvance"
+                                min={1}
+                                max={90}
+                                fallback={1}
+                                className="w-full pr-12"
+                                value={config.MAX_DAYS_IN_ADVANCE}
+                                onCommit={(val) => setConfig({ ...config, MAX_DAYS_IN_ADVANCE: val ?? 1 })}
+                            />
+                            <span className="absolute right-3 text-sm text-muted-foreground pointer-events-none">days</span>
+                        </div>
+                    </div>
+
+                    {/* Minimum Notice */}
+                    <div className="space-y-3">
+                        <div className="space-y-1">
+                            <Label htmlFor="minDaysInAdvance" className="text-sm font-medium">Minimum Notice</Label>
+                            <p className="text-xs text-muted-foreground">
+                                How many days out the earliest bookable appointment must be (0 for no minimum).
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-4 relative">
+                            <Input
+                                id="minDaysInAdvance"
                                 type="number"
-                                min="1"
+                                min="0"
                                 max="90"
                                 className="w-full pr-12"
-                                value={config.DAYS_IN_ADVANCE}
+                                value={config.MIN_DAYS_IN_ADVANCE ?? 0}
                                 onChange={(e) => {
                                     const val = parseInt(e.target.value, 10);
-                                    if (!isNaN(val)) {
-                                        setConfig({ ...config, DAYS_IN_ADVANCE: Math.max(1, val) });
-                                    } else {
-                                        setConfig({ ...config, DAYS_IN_ADVANCE: 1 });
-                                    }
+                                    setConfig({ ...config, MIN_DAYS_IN_ADVANCE: isNaN(val) ? 0 : Math.max(0, val) });
                                 }}
                             />
                             <span className="absolute right-3 text-sm text-muted-foreground pointer-events-none">days</span>
@@ -501,6 +664,47 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                     )}
                 </div>
 
+                {/* Host Calendar (organizer) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-2">
+                    <div className="space-y-3">
+                        <div className="space-y-1">
+                            <Label className="text-sm font-medium">Host Calendar</Label>
+                            <p className="text-xs text-muted-foreground">
+                                The calendar the event is created on (its owner is the organizer).
+                                Leave as "No fixed host" to let the scheduling strategy decide.
+                            </p>
+                        </div>
+                        <CalendarSingleSelect
+                            value={config.hostCalendar ?? ""}
+                            available={availableCalendars}
+                            placeholder="No fixed host (use strategy)"
+                            noneLabel="No fixed host (use strategy)"
+                            onChange={(val) => setConfig({ ...config, hostCalendar: val })}
+                        />
+                    </div>
+
+                    {/* Only relevant once a fixed host is chosen. */}
+                    {(config.hostCalendar ?? "") !== "" && (
+                        <div className="space-y-3">
+                            <div className="space-y-1">
+                                <Label className="text-sm font-medium">Invite Monitored Calendars</Label>
+                                <p className="text-xs text-muted-foreground">
+                                    Add the monitored calendars as attendees, or use them only to check for conflicts.
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-3 pt-1">
+                                <Switch
+                                    checked={config.inviteAvailabilityCalendars ?? false}
+                                    onCheckedChange={(checked) => setConfig({ ...config, inviteAvailabilityCalendars: checked })}
+                                />
+                                <span className="text-sm text-muted-foreground">
+                                    {config.inviteAvailabilityCalendars ? "Invited as attendees" : "Conflict-check only"}
+                                </span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
                 {/* Event Types */}
                 <div className="space-y-4 pt-4 border-t">
                     <div className="flex justify-between items-center">
@@ -550,7 +754,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                         <Input
                                             id={`slug-${index}`}
                                             value={et.id}
-                                            onChange={(e) => updateEventType(index, { id: e.target.value.replace(/\s+/g, '-').toLowerCase() })}
+                                            onChange={(e) => updateEventType(index, { id: toSlug(e.target.value) })}
                                             placeholder="e.g. 30min"
                                             className={duplicateIds.includes(et.id) ? "border-destructive ring-destructive shadow-[0_0_0_1px_rgba(239,68,68,0.5)]" : ""}
                                         />
@@ -563,22 +767,19 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </p>
                                         </div>
                                         <div className="relative">
-                                            <Input
+                                            <ClampedNumberInput
                                                 id={`duration-${index}`}
-                                                type="number"
-                                                min="1"
-                                                max="1440"
+                                                min={1}
+                                                max={1440}
+                                                fallback={1}
                                                 className="pr-20"
                                                 value={et.duration}
-                                                onChange={(e) => {
-                                                    const val = parseInt(e.target.value) || 1;
-                                                    updateEventType(index, { duration: Math.min(1440, Math.max(1, val)) });
-                                                }}
+                                                onCommit={(val) => updateEventType(index, { duration: val ?? 1 })}
                                             />
                                             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">minutes</span>
                                         </div>
                                     </div>
-                                    <div className="flex flex-col gap-4">
+                                    <div className="space-y-2">
                                         <div className="flex items-start gap-4">
                                             <Switch
                                                 id={`selectable-${index}`}
@@ -593,7 +794,106 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 <span className="block text-[10px] text-muted-foreground">If disabled, this type can only be booked via direct links</span>
                                             </div>
                                         </div>
-
+                                    </div>
+                                    <div className="space-y-2">
+                                        <div className="space-y-1">
+                                            <Label className="text-sm font-medium">Guest Permissions</Label>
+                                            <p className="text-xs text-muted-foreground">
+                                                Control what guests can do with this event.
+                                            </p>
+                                        </div>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button variant="outline" className="w-full justify-between font-normal">
+                                                    <span className="truncate">
+                                                        {(() => {
+                                                            const permissions = [];
+                                                            if (et.guestsCanModify) permissions.push('Modify');
+                                                            if (et.guestsCanInviteOthers) permissions.push('Invite');
+                                                            if (et.guestsCanSeeOtherGuests ?? true) permissions.push('See guests');
+                                                            // An empty list means every permission is off — including seeing
+                                                            // guests, so "See guests only" said the exact opposite. (The
+                                                            // default, see-guests-only, already renders as "See guests".)
+                                                            return permissions.length > 0 ? permissions.join(', ') : 'None';
+                                                        })()}
+                                                    </span>
+                                                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                                                <DropdownMenuCheckboxItem
+                                                    checked={et.guestsCanModify ?? false}
+                                                    onCheckedChange={(checked) => updateEventType(index, { guestsCanModify: checked })}
+                                                    onSelect={(e) => e.preventDefault()}
+                                                >
+                                                    <div className="flex flex-col gap-1">
+                                                        <span>Allow guests to modify event</span>
+                                                        <span className="text-xs text-muted-foreground">Change time, location, details</span>
+                                                    </div>
+                                                </DropdownMenuCheckboxItem>
+                                                <DropdownMenuCheckboxItem
+                                                    checked={et.guestsCanInviteOthers ?? false}
+                                                    onCheckedChange={(checked) => updateEventType(index, { guestsCanInviteOthers: checked })}
+                                                    onSelect={(e) => e.preventDefault()}
+                                                >
+                                                    <div className="flex flex-col gap-1">
+                                                        <span>Allow guests to invite others</span>
+                                                        <span className="text-xs text-muted-foreground">Add additional attendees</span>
+                                                    </div>
+                                                </DropdownMenuCheckboxItem>
+                                                <DropdownMenuCheckboxItem
+                                                    checked={et.guestsCanSeeOtherGuests ?? true}
+                                                    onCheckedChange={(checked) => updateEventType(index, { guestsCanSeeOtherGuests: checked })}
+                                                    onSelect={(e) => e.preventDefault()}
+                                                >
+                                                    <div className="flex flex-col gap-1">
+                                                        <span>Allow guests to see other guests</span>
+                                                        <span className="text-xs text-muted-foreground">View attendee list</span>
+                                                    </div>
+                                                </DropdownMenuCheckboxItem>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <div className="space-y-1">
+                                            <Label className="text-sm font-medium">Calendar Visibility</Label>
+                                            <p className="text-xs text-muted-foreground">
+                                                How the event appears in Google Calendar.
+                                            </p>
+                                        </div>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button variant="outline" className="w-full justify-between font-normal">
+                                                    <span className="truncate">
+                                                        {et.visibility === 'public' ? 'Public' : et.visibility === 'private' ? 'Private' : 'Default'}
+                                                    </span>
+                                                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                                                <DropdownMenuItem onClick={() => updateEventType(index, { visibility: 'default' })}>
+                                                    <div className="flex flex-col gap-1">
+                                                        <span>Default</span>
+                                                        <span className="text-xs text-muted-foreground">Uses calendar's default visibility setting</span>
+                                                    </div>
+                                                    {(!et.visibility || et.visibility === 'default') && <Check className="ml-auto h-4 w-4" />}
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem onClick={() => updateEventType(index, { visibility: 'public' })}>
+                                                    <div className="flex flex-col gap-1">
+                                                        <span>Public</span>
+                                                        <span className="text-xs text-muted-foreground">Event details visible to everyone</span>
+                                                    </div>
+                                                    {et.visibility === 'public' && <Check className="ml-auto h-4 w-4" />}
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem onClick={() => updateEventType(index, { visibility: 'private' })}>
+                                                    <div className="flex flex-col gap-1">
+                                                        <span>Private</span>
+                                                        <span className="text-xs text-muted-foreground">Shows as "Busy" without event details</span>
+                                                    </div>
+                                                    {et.visibility === 'private' && <Check className="ml-auto h-4 w-4" />}
+                                                </DropdownMenuItem>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
                                     </div>
 
 
@@ -612,7 +912,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             size="sm"
                                             className="h-8"
                                             onClick={() => {
-                                                const url = `${scriptUrl}?event-type=${et.id}`;
+                                                // Encode rather than interpolate raw: a slug saved before
+                                                // toSlug() existed can still hold & or #, and both readers
+                                                // (URLSearchParams and Apps Script's getLocation) decode.
+                                                const url = `${scriptUrl}?event-type=${encodeURIComponent(et.id)}`;
                                                 navigator.clipboard.writeText(url);
                                             }}
                                         >
@@ -642,9 +945,31 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 </div>
                                                 <Input
                                                     type="number"
-                                                    placeholder={`Global: ${config.DAYS_IN_ADVANCE}`}
-                                                    value={et.DAYS_IN_ADVANCE || ""}
-                                                    onChange={(e) => updateEventType(index, { DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}
+                                                    min="1"
+                                                    max="90"
+                                                    placeholder={`Global: ${config.MAX_DAYS_IN_ADVANCE}`}
+                                                    value={et.MAX_DAYS_IN_ADVANCE || ""}
+                                                    onChange={(e) => updateEventType(index, { MAX_DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}
+                                                />
+                                            </div>
+
+                                            {/* Minimum Notice Override */}
+                                            <div className="space-y-2">
+                                                <div className="space-y-1">
+                                                    <Label className="text-sm font-medium">Minimum Notice</Label>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        Override the global minimum notice for this event type.
+                                                    </p>
+                                                </div>
+                                                <Input
+                                                    type="number"
+                                                    min="0"
+                                                    placeholder={`Global: ${config.MIN_DAYS_IN_ADVANCE ?? 0}`}
+                                                    value={et.MIN_DAYS_IN_ADVANCE ?? ""}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value, 10);
+                                                        updateEventType(index, { MIN_DAYS_IN_ADVANCE: isNaN(val) ? undefined : Math.max(0, val) });
+                                                    }}
                                                 />
                                             </div>
 
@@ -700,6 +1025,60 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                             >
                                                                 {day.label}
                                                             </DropdownMenuCheckboxItem>
+                                                        ))}
+                                                    </DropdownMenuContent>
+                                                </DropdownMenu>
+                                            </div>
+                                        </div>
+
+                                        {/* Max Bookings Limit */}
+                                        <div className="space-y-2">
+                                            <div className="space-y-1">
+                                                <div className="flex justify-between items-center">
+                                                    <Label className="text-sm font-medium">Max Bookings</Label>
+                                                    {et.maxBookings && (
+                                                        <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(index, { maxBookings: undefined, maxBookingsPeriod: undefined })}>
+                                                            Remove Limit
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                                <p className="text-xs text-muted-foreground">
+                                                    Cap how many times this event type can be booked per period.
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <Input
+                                                    type="number"
+                                                    min={1}
+                                                    className="w-28"
+                                                    placeholder="No limit"
+                                                    value={et.maxBookings || ""}
+                                                    onChange={(e) => {
+                                                        const val = parseInt(e.target.value) || undefined;
+                                                        updateEventType(index, {
+                                                            maxBookings: val,
+                                                            // Default the period to "week" when a limit is first entered.
+                                                            maxBookingsPeriod: val ? (et.maxBookingsPeriod ?? 'week') : undefined,
+                                                        });
+                                                    }}
+                                                />
+                                                <span className="text-muted-foreground text-xs">per</span>
+                                                <DropdownMenu>
+                                                    <DropdownMenuTrigger asChild disabled={!et.maxBookings}>
+                                                        <Button variant="outline" className="justify-between font-normal min-w-[110px]" disabled={!et.maxBookings}>
+                                                            <span className="capitalize">{et.maxBookingsPeriod ?? 'week'}</span>
+                                                            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                                        </Button>
+                                                    </DropdownMenuTrigger>
+                                                    <DropdownMenuContent>
+                                                        {(['day', 'week', 'month', 'quarter', 'year'] as const).map((p) => (
+                                                            <DropdownMenuItem
+                                                                key={p}
+                                                                className="capitalize"
+                                                                onClick={() => updateEventType(index, { maxBookingsPeriod: p })}
+                                                            >
+                                                                {p}
+                                                            </DropdownMenuItem>
                                                         ))}
                                                     </DropdownMenuContent>
                                                 </DropdownMenu>
@@ -832,6 +1211,46 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     </DropdownMenu>
                                                 </div>
                                             )}
+
+                                            {/* Host Calendar Override */}
+                                            <div className="space-y-2">
+                                                <div className="flex justify-between items-center">
+                                                    <Label className="text-sm font-medium">Host Calendar</Label>
+                                                    {et.hostCalendar !== undefined && (
+                                                        <Button
+                                                            variant="link"
+                                                            size="sm"
+                                                            className="h-auto p-0 text-destructive"
+                                                            onClick={() => updateEventType(index, { hostCalendar: undefined })}
+                                                        >
+                                                            Reset to Global
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                                <p className="text-xs text-muted-foreground">
+                                                    Override which calendar the event is created on.
+                                                </p>
+                                                <CalendarSingleSelect
+                                                    value={et.hostCalendar ?? config.hostCalendar ?? ""}
+                                                    available={availableCalendars}
+                                                    placeholder={et.hostCalendar === undefined ? "Using global settings" : "No fixed host (use strategy)"}
+                                                    noneLabel="No fixed host (use strategy)"
+                                                    onChange={(val) => updateEventType(index, { hostCalendar: val })}
+                                                />
+                                                {(et.hostCalendar ?? config.hostCalendar ?? "") !== "" && (
+                                                    <div className="flex items-center gap-3 pt-1">
+                                                        <Switch
+                                                            checked={et.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false}
+                                                            onCheckedChange={(checked) => updateEventType(index, { inviteAvailabilityCalendars: checked })}
+                                                        />
+                                                        <span className="text-xs text-muted-foreground">
+                                                            {(et.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false)
+                                                                ? "Monitored calendars invited as attendees"
+                                                                : "Monitored calendars checked for conflicts only"}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
 
                                     </div>

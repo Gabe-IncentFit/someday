@@ -14,6 +14,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useBookGoogleTimeslot } from "@/hooks/useBookGoogleTimeslot";
 import { useGoogleTimeslots } from "@/hooks/useGoogleTimeslots";
+import { cn } from "@/lib/utils";
 
 import { ModeToggle } from "@/components/mode-toggle";
 import { Else, Show, When } from "@/components/WhenShowElse";
@@ -37,11 +38,15 @@ import { useTimezoneDropdown } from "./timezone-dropdown";
 export function CalendarPicker({
   onOpenConfig,
   eventType,
-  onBack
+  onBack,
+  showThemeToggle = true,
+  embedded = false
 }: {
   onOpenConfig?: () => void;
   eventType: EventType;
   onBack?: () => void;
+  showThemeToggle?: boolean;
+  embedded?: boolean;
 }) {
   const [TimezoneDropdown, timezone] = useTimezoneDropdown();
   const [selectedDate, setSelectedDate] = useState<Date | undefined>(undefined);
@@ -125,6 +130,17 @@ export function CalendarPicker({
     setSelectedTimeSlot(undefined);
   };
 
+  const controls = (
+    <>
+      {showThemeToggle && <ModeToggle />}
+      {onOpenConfig && (
+        <Button variant="outline" size="icon" onClick={onOpenConfig}>
+          <Settings className="h-4 w-4" />
+        </Button>
+      )}
+    </>
+  );
+
   if (selectedTimeSlot && bookingStatus === "success") {
     return (
       <Card className="sm:w-[600px] p-4 mx-auto min-h-[400px] flex flex-col justify-center space-y-4">
@@ -153,13 +169,17 @@ export function CalendarPicker({
         confirm={resetBookGoogle}
       />
 
-      <Card className="sm:w-[600px] mx-auto min-h-[400px] space-y-4 relative">
+      <Card className="w-full max-w-[600px] mx-auto min-h-[400px] space-y-4 relative">
         <When condition={slotsStatus === "pending"}>
           <Show>
-            <div className="bg-primary absolute rounded-xl z-50 opacity-70 inset-0">
-              <div className="flex justify-center items-center h-full flex-col stroke-primary-foreground">
+            {/* A veil, not a brand surface: this used to be bg-primary, which
+                read as a neutral scrim only while --primary happened to be
+                near-black. A host setting its own brand turned the whole card
+                that colour. */}
+            <div className="bg-background absolute rounded-xl z-50 opacity-70 inset-0">
+              <div className="flex justify-center items-center h-full flex-col stroke-foreground">
                 <Loader2 size={60} className="animate-spin" stroke="current" />
-                <p className="text-lg font-semibold text-primary-foreground">
+                <p className="text-lg font-semibold text-foreground">
                   Loading...
                 </p>
               </div>
@@ -167,30 +187,28 @@ export function CalendarPicker({
           </Show>
         </When>
         <div className="relative max-h-0">
-          <div className="md:hidden absolute right-1 top-1 flex flex-col gap-2">
-            <ModeToggle />
-            {onOpenConfig && (
-              <Button variant="outline" size="icon" onClick={onOpenConfig}>
-                <Settings className="h-4 w-4" />
-              </Button>
-            )}
+          <div className={cn("absolute right-1 top-1 flex flex-col gap-2", !embedded && "md:hidden")}>
+            {controls}
           </div>
-          <div className="absolute -right-10 -top-10 md:flex hidden flex-col gap-1">
-            <ModeToggle />
-            {onOpenConfig && (
-              <Button variant="outline" size="icon" onClick={onOpenConfig}>
-                <Settings className="h-4 w-4" />
-              </Button>
-            )}
-          </div>
+          {/* Wide screens hang these just outside the card. An embedded frame is
+              sized to its content, so there is no outside left to hang into and
+              they would be clipped by the frame edge. */}
+          {!embedded && (
+            <div className="absolute -right-10 -top-10 md:flex hidden flex-col gap-1">
+              {controls}
+            </div>
+          )}
         </div>
         <When condition={!showForm}>
           <Show>
             <CardHeader className="max-w-full">
-              <div className="flex justify-between items-center sm:items-start flex-col sm:flex-row gap-4 relative">
+              {/* Wrapping (not a breakpoint) decides the timezone's place: it
+                  sits top-right beside a title that leaves room, and drops to
+                  its own line when the title needs the width. */}
+              <div className="flex flex-wrap justify-between items-start gap-x-4 gap-y-3 relative">
                 <CardTitle className="max-w-full">
                   <div className="flex flex-col gap-1.5">
-                    <div className="text-2xl font-bold whitespace-nowrap overflow-ellipsis overflow-hidden">
+                    <div className="text-2xl font-bold break-words">
                       {eventType?.name || "Appointment Scheduler"}
                     </div>
                     <div className="flex items-center gap-1.5 text-sm font-normal text-muted-foreground">
@@ -200,8 +218,8 @@ export function CalendarPicker({
                   </div>
                 </CardTitle>
 
-                <div className="flex items-center gap-2 sm:pt-1">
-                  <Label className="text-sm text-muted-foreground">
+                <div className="flex items-center gap-2 shrink-0">
+                  <Label className="text-sm text-muted-foreground whitespace-nowrap">
                     Your Timezone
                   </Label>
                   <TimezoneDropdown />

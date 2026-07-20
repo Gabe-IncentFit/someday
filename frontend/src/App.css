@@ -2,6 +2,17 @@
   max-width: 1280px;
   margin: 0 auto;
   padding: 2rem;
+  /* Flex item of a flex body: min-width defaults to auto, which lets wide
+     content push #root past the viewport instead of shrinking to it. */
+  min-width: 0;
+}
+
+html.embedded #root {
+  max-width: none;
+  /* The host page supplies the surrounding spacing. What is left is room for
+     the card's shadow, which sits outside its border box and would otherwise be
+     clipped by the frame edge once the frame is sized exactly to content. */
+  padding: 0.5rem;
 }
 
 .logo {

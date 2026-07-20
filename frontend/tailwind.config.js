@@ -8,6 +8,10 @@ export default {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+        // Buttons track --radius like everything else until a host overrides
+        // just them: a brand can round its buttons harder than its panels, and
+        // one shared token cannot say both.
+        btn: "var(--button-radius, calc(var(--radius) - 2px))",
       },
       colors: {
         background: "hsl(var(--background))",

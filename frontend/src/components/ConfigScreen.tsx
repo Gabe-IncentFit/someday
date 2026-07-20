@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -9,7 +9,9 @@ import {
     ChevronsUpDown,
     ChevronDown,
     ChevronUp,
-    Trash2
+    Copy,
+    Trash2,
+    TriangleAlert
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -33,6 +35,19 @@ import {
     DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "./ui/switch";
+import { Badge } from "./ui/badge";
+import { ScrollArea } from "./ui/scroll-area";
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+    AlertDialogTrigger,
+} from "./ui/alert-dialog";
 import { GoogleLib } from "@/lib/googlelib";
 import { CalendarMultiSelect } from "./CalendarMultiSelect";
 import { CalendarSingleSelect } from "./CalendarSingleSelect";
@@ -152,14 +167,53 @@ function toSlug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9._~-]+/g, "-");
 }
 
+// Availability fails closed: a calendar the script cannot read free/busy for
+// counts as busy rather than raising anything, so one unreadable calendar in a
+// collective set — or a fixed host, which forces collective semantics — quietly
+// empties the whole booking page. That is invisible from here otherwise, since a
+// calendar can be picked by typing any address.
+function CalendarAccessWarning({
+    ids,
+    unreachable,
+}: {
+    ids: (string | undefined)[];
+    unreachable: Set<string>;
+}) {
+    const blocked = ids.filter((id): id is string => !!id && unreachable.has(id));
+    if (blocked.length === 0) return null;
+    return (
+        <p className="flex items-start gap-1.5 pt-1 text-xs text-destructive">
+            <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-px" />
+            <span>
+                No free/busy access to {blocked.join(", ")}. Calendars that can't be
+                read count as busy, which hides every slot. Share with this account —
+                use "Make changes to events", which booking needs too.
+            </span>
+        </p>
+    );
+}
+
 export function ConfigScreen({ onBack }: { onBack: () => void }) {
     const [config, setConfig] = useState<Config | null>(null);
     const [availableCalendars, setAvailableCalendars] = useState<CalendarInfo[]>([]);
+    const [unreachableCalendars, setUnreachableCalendars] = useState<Set<string>>(new Set());
     const [scriptUrl, setScriptUrl] = useState<string>("");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [tzOpen, setTzOpen] = useState(false);
-    const [expandedEventTypes, setExpandedEventTypes] = useState<string[]>([]);
+    // Which event type the editor below the list is showing. Tracked by index,
+    // not id: the slug is a live-edited field and may be empty or duplicated
+    // mid-keystroke, so it cannot identify a row.
+    const [selectedEventType, setSelectedEventType] = useState(0);
+    const [showOverrides, setShowOverrides] = useState(false);
+    const selectedRow = useRef<HTMLButtonElement>(null);
+
+    // Once the list scrolls, the row a selection lands on is often out of view —
+    // adding a type would otherwise open its editor while the list appeared not
+    // to react. "nearest" leaves an already-visible row alone.
+    useEffect(() => {
+        selectedRow.current?.scrollIntoView({ block: "nearest" });
+    }, [selectedEventType]);
 
     const timeZones = useMemo(() => {
         try {
@@ -169,6 +223,46 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
         }
     }, []);
+
+    // Every calendar the config actually depends on, global and per-event-type.
+    const referencedCalendarIds = useMemo(() => {
+        if (!config) return [];
+        const ids = new Set<string>();
+        (config.CALENDARS ?? []).forEach((id) => ids.add(id));
+        if (config.hostCalendar) ids.add(config.hostCalendar);
+        (config.EVENT_TYPES ?? []).forEach((et) => {
+            (et.CALENDARS ?? []).forEach((id) => ids.add(id));
+            if (et.hostCalendar) ids.add(et.hostCalendar);
+        });
+        return [...ids].filter(Boolean);
+    }, [config]);
+
+    const referencedCalendarKey = referencedCalendarIds.join("|");
+
+    useEffect(() => {
+        if (referencedCalendarIds.length === 0) {
+            setUnreachableCalendars(new Set());
+            return;
+        }
+        let cancelled = false;
+        GoogleLib.google.script.run
+            .withSuccessHandler((results: { id: string; readable: boolean }[]) => {
+                if (cancelled) return;
+                setUnreachableCalendars(
+                    new Set((results || []).filter((r) => !r.readable).map((r) => r.id))
+                );
+            })
+            .withFailureHandler(() => {
+                // Leave the last known state alone: a probe that failed to run is
+                // not evidence that a calendar is unreadable, and inventing a
+                // warning here would be worse than staying quiet.
+            })
+            .checkCalendarAccess(referencedCalendarIds);
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [referencedCalendarKey]);
 
     const duplicateIds = useMemo(() => {
         if (!config?.EVENT_TYPES) return [];
@@ -389,15 +483,12 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
         setConfig({ ...config, WORKDAYS: newWorkdays });
     };
 
-    const toggleEventTypeExpansion = (index: number) => {
-        setExpandedEventTypes(prev =>
-            prev.includes(index.toString())
-                ? prev.filter(i => i !== index.toString())
-                : [...prev, index.toString()]
-        );
+    const selectEventType = (index: number) => {
+        setSelectedEventType(index);
+        // Overrides are a per-type disclosure, so an open one must not carry
+        // across to a type that has none set.
+        setShowOverrides(false);
     };
-
-
 
     const addEventType = () => {
         const newEt: EventType = {
@@ -408,6 +499,21 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             // Initialize with defaults if desired, or keep undefined to follow global
         };
         setConfig({ ...config, EVENT_TYPES: [...config.EVENT_TYPES, newEt] });
+        selectEventType(config.EVENT_TYPES.length);
+    };
+
+    const duplicateEventType = (index: number) => {
+        const source = config.EVENT_TYPES[index];
+        // The slug is the booking URL and must be unique, so it cannot be copied
+        // as-is: a duplicate one blocks saving until it's fixed by hand.
+        const taken = new Set(config.EVENT_TYPES.map((t) => t.id));
+        let id = `${source.id}-copy`;
+        for (let n = 2; taken.has(id); n++) id = `${source.id}-copy-${n}`;
+
+        const newEventTypes = [...config.EVENT_TYPES];
+        newEventTypes.splice(index + 1, 0, { ...source, id, name: `${source.name} (copy)` });
+        setConfig({ ...config, EVENT_TYPES: newEventTypes });
+        selectEventType(index + 1);
     };
 
     const updateEventType = (index: number, updates: Partial<EventType>) => {
@@ -422,11 +528,16 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
             return;
         }
         const newEventTypes = config.EVENT_TYPES.filter((_, i) => i !== index);
-        // Also clean up expansion state if necessary, though index shifts make this tricky
-        // For simplicity, we'll just clear expansion for now or let it be slightly off
-        setExpandedEventTypes([]);
+        // Only the selected type can be removed, so the editor has to move on to
+        // whatever now occupies that index — or to the new last row, when the
+        // removed one was at the end.
+        selectEventType(Math.min(index, newEventTypes.length - 1));
         setConfig({ ...config, EVENT_TYPES: newEventTypes });
     };
+
+    // Undefined only if the stored EVENT_TYPES is empty, which the UI cannot
+    // produce but a hand-edited script property can.
+    const editing = config.EVENT_TYPES[selectedEventType];
 
     return (
         <Card className="sm:w-[600px] mx-auto space-y-4 relative">
@@ -620,6 +731,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                             available={availableCalendars}
                             onChange={(vals) => setConfig({ ...config, CALENDARS: vals })}
                         />
+                        <CalendarAccessWarning ids={config.CALENDARS} unreachable={unreachableCalendars} />
                     </div>
 
                     {/* Global Scheduling Strategy */}
@@ -681,6 +793,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                             noneLabel="No fixed host (use strategy)"
                             onChange={(val) => setConfig({ ...config, hostCalendar: val })}
                         />
+                        <CalendarAccessWarning ids={[config.hostCalendar]} unreachable={unreachableCalendars} />
                     </div>
 
                     {/* Only relevant once a fixed host is chosen. */}
@@ -720,30 +833,71 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                     </div>
 
                     <div className="space-y-4">
-                        {config.EVENT_TYPES.map((et, index) => (
-                            <Card key={index} className="p-4 bg-muted/30">
+                        {/* The list is the only way to reach a type's editor, so it
+                            must surface what makes a row worth clicking: a broken
+                            slug, or a type the public page never shows. */}
+                        <ScrollArea className={cn("rounded-md border", config.EVENT_TYPES.length > 8 && "h-[352px]")}>
+                            <div className="divide-y">
+                                {config.EVENT_TYPES.map((row, i) => (
+                                    <button
+                                        key={i}
+                                        type="button"
+                                        ref={i === selectedEventType ? selectedRow : undefined}
+                                        onClick={() => selectEventType(i)}
+                                        aria-current={i === selectedEventType}
+                                        className={cn(
+                                            "w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors",
+                                            i === selectedEventType
+                                                ? "bg-primary/10 border-l-2 border-l-primary"
+                                                : "border-l-2 border-l-transparent hover:bg-muted/50"
+                                        )}
+                                    >
+                                        <span className="flex-1 min-w-0">
+                                            <span className="block text-sm font-medium truncate">
+                                                {row.name || "Untitled"}
+                                            </span>
+                                            <span className="block text-xs text-muted-foreground truncate">
+                                                /{row.id}
+                                            </span>
+                                        </span>
+                                        {duplicateIds.includes(row.id) && (
+                                            <Badge variant="destructive" className="text-[10px] shrink-0">DUPLICATE</Badge>
+                                        )}
+                                        {!row.selectable && (
+                                            <Badge variant="secondary" className="text-[10px] shrink-0">Hidden</Badge>
+                                        )}
+                                        <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                                            {row.duration}m
+                                        </span>
+                                    </button>
+                                ))}
+                            </div>
+                        </ScrollArea>
+
+                        {editing && (
+                            <Card className="p-4 bg-muted/30">
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div className="space-y-2">
                                         <div className="space-y-1">
                                             <div className="flex justify-between items-center">
-                                                <Label htmlFor={`name-${index}`} className="text-sm font-medium">Name</Label>
+                                                <Label htmlFor={`name-${selectedEventType}`} className="text-sm font-medium">Name</Label>
                                             </div>
                                             <p className="text-xs text-muted-foreground">
                                                 The name shown to users when booking.
                                             </p>
                                         </div>
                                         <Input
-                                            id={`name-${index}`}
-                                            value={et.name}
-                                            onChange={(e) => updateEventType(index, { name: e.target.value })}
+                                            id={`name-${selectedEventType}`}
+                                            value={editing.name}
+                                            onChange={(e) => updateEventType(selectedEventType, { name: e.target.value })}
                                             placeholder="e.g. 30 Min Meeting"
                                         />
                                     </div>
                                     <div className="space-y-2">
                                         <div className="space-y-1">
                                             <div className="flex justify-between items-center">
-                                                <Label htmlFor={`slug-${index}`} className="text-sm font-medium">Slug / ID</Label>
-                                                {duplicateIds.includes(et.id) && (
+                                                <Label htmlFor={`slug-${selectedEventType}`} className="text-sm font-medium">Slug / ID</Label>
+                                                {duplicateIds.includes(editing.id) && (
                                                     <span className="text-[10px] text-destructive font-bold animate-pulse">DUPLICATE</span>
                                                 )}
                                             </div>
@@ -752,29 +906,29 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </p>
                                         </div>
                                         <Input
-                                            id={`slug-${index}`}
-                                            value={et.id}
-                                            onChange={(e) => updateEventType(index, { id: toSlug(e.target.value) })}
+                                            id={`slug-${selectedEventType}`}
+                                            value={editing.id}
+                                            onChange={(e) => updateEventType(selectedEventType, { id: toSlug(e.target.value) })}
                                             placeholder="e.g. 30min"
-                                            className={duplicateIds.includes(et.id) ? "border-destructive ring-destructive shadow-[0_0_0_1px_rgba(239,68,68,0.5)]" : ""}
+                                            className={duplicateIds.includes(editing.id) ? "border-destructive ring-destructive shadow-[0_0_0_1px_rgba(239,68,68,0.5)]" : ""}
                                         />
                                     </div>
                                     <div className="space-y-2">
                                         <div className="space-y-1">
-                                            <Label htmlFor={`duration-${index}`} className="text-sm font-medium">Duration</Label>
+                                            <Label htmlFor={`duration-${selectedEventType}`} className="text-sm font-medium">Duration</Label>
                                             <p className="text-xs text-muted-foreground">
                                                 How long this appointment type will last.
                                             </p>
                                         </div>
                                         <div className="relative">
                                             <ClampedNumberInput
-                                                id={`duration-${index}`}
+                                                id={`duration-${selectedEventType}`}
                                                 min={1}
                                                 max={1440}
                                                 fallback={1}
                                                 className="pr-20"
-                                                value={et.duration}
-                                                onCommit={(val) => updateEventType(index, { duration: val ?? 1 })}
+                                                value={editing.duration}
+                                                onCommit={(val) => updateEventType(selectedEventType, { duration: val ?? 1 })}
                                             />
                                             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">minutes</span>
                                         </div>
@@ -782,13 +936,13 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                     <div className="space-y-2">
                                         <div className="flex items-start gap-4">
                                             <Switch
-                                                id={`selectable-${index}`}
-                                                checked={et.selectable}
-                                                onCheckedChange={(checked) => updateEventType(index, { selectable: checked })}
+                                                id={`selectable-${selectedEventType}`}
+                                                checked={editing.selectable}
+                                                onCheckedChange={(checked) => updateEventType(selectedEventType, { selectable: checked })}
                                                 className="mt-1"
                                             />
                                             <div className="space-y-1">
-                                                <Label htmlFor={`selectable-${index}`} className="text-sm font-normal cursor-pointer">
+                                                <Label htmlFor={`selectable-${selectedEventType}`} className="text-sm font-normal cursor-pointer">
                                                     Show on public selection page
                                                 </Label>
                                                 <span className="block text-[10px] text-muted-foreground">If disabled, this type can only be booked via direct links</span>
@@ -808,9 +962,9 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     <span className="truncate">
                                                         {(() => {
                                                             const permissions = [];
-                                                            if (et.guestsCanModify) permissions.push('Modify');
-                                                            if (et.guestsCanInviteOthers) permissions.push('Invite');
-                                                            if (et.guestsCanSeeOtherGuests ?? true) permissions.push('See guests');
+                                                            if (editing.guestsCanModify) permissions.push('Modify');
+                                                            if (editing.guestsCanInviteOthers) permissions.push('Invite');
+                                                            if (editing.guestsCanSeeOtherGuests ?? true) permissions.push('See guests');
                                                             // An empty list means every permission is off — including seeing
                                                             // guests, so "See guests only" said the exact opposite. (The
                                                             // default, see-guests-only, already renders as "See guests".)
@@ -822,8 +976,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </DropdownMenuTrigger>
                                             <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
                                                 <DropdownMenuCheckboxItem
-                                                    checked={et.guestsCanModify ?? false}
-                                                    onCheckedChange={(checked) => updateEventType(index, { guestsCanModify: checked })}
+                                                    checked={editing.guestsCanModify ?? false}
+                                                    onCheckedChange={(checked) => updateEventType(selectedEventType, { guestsCanModify: checked })}
                                                     onSelect={(e) => e.preventDefault()}
                                                 >
                                                     <div className="flex flex-col gap-1">
@@ -832,8 +986,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     </div>
                                                 </DropdownMenuCheckboxItem>
                                                 <DropdownMenuCheckboxItem
-                                                    checked={et.guestsCanInviteOthers ?? false}
-                                                    onCheckedChange={(checked) => updateEventType(index, { guestsCanInviteOthers: checked })}
+                                                    checked={editing.guestsCanInviteOthers ?? false}
+                                                    onCheckedChange={(checked) => updateEventType(selectedEventType, { guestsCanInviteOthers: checked })}
                                                     onSelect={(e) => e.preventDefault()}
                                                 >
                                                     <div className="flex flex-col gap-1">
@@ -842,8 +996,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     </div>
                                                 </DropdownMenuCheckboxItem>
                                                 <DropdownMenuCheckboxItem
-                                                    checked={et.guestsCanSeeOtherGuests ?? true}
-                                                    onCheckedChange={(checked) => updateEventType(index, { guestsCanSeeOtherGuests: checked })}
+                                                    checked={editing.guestsCanSeeOtherGuests ?? true}
+                                                    onCheckedChange={(checked) => updateEventType(selectedEventType, { guestsCanSeeOtherGuests: checked })}
                                                     onSelect={(e) => e.preventDefault()}
                                                 >
                                                     <div className="flex flex-col gap-1">
@@ -865,32 +1019,32 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             <DropdownMenuTrigger asChild>
                                                 <Button variant="outline" className="w-full justify-between font-normal">
                                                     <span className="truncate">
-                                                        {et.visibility === 'public' ? 'Public' : et.visibility === 'private' ? 'Private' : 'Default'}
+                                                        {editing.visibility === 'public' ? 'Public' : editing.visibility === 'private' ? 'Private' : 'Default'}
                                                     </span>
                                                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                                                 </Button>
                                             </DropdownMenuTrigger>
                                             <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
-                                                <DropdownMenuItem onClick={() => updateEventType(index, { visibility: 'default' })}>
+                                                <DropdownMenuItem onClick={() => updateEventType(selectedEventType, { visibility: 'default' })}>
                                                     <div className="flex flex-col gap-1">
                                                         <span>Default</span>
                                                         <span className="text-xs text-muted-foreground">Uses calendar's default visibility setting</span>
                                                     </div>
-                                                    {(!et.visibility || et.visibility === 'default') && <Check className="ml-auto h-4 w-4" />}
+                                                    {(!editing.visibility || editing.visibility === 'default') && <Check className="ml-auto h-4 w-4" />}
                                                 </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => updateEventType(index, { visibility: 'public' })}>
+                                                <DropdownMenuItem onClick={() => updateEventType(selectedEventType, { visibility: 'public' })}>
                                                     <div className="flex flex-col gap-1">
                                                         <span>Public</span>
                                                         <span className="text-xs text-muted-foreground">Event details visible to everyone</span>
                                                     </div>
-                                                    {et.visibility === 'public' && <Check className="ml-auto h-4 w-4" />}
+                                                    {editing.visibility === 'public' && <Check className="ml-auto h-4 w-4" />}
                                                 </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => updateEventType(index, { visibility: 'private' })}>
+                                                <DropdownMenuItem onClick={() => updateEventType(selectedEventType, { visibility: 'private' })}>
                                                     <div className="flex flex-col gap-1">
                                                         <span>Private</span>
                                                         <span className="text-xs text-muted-foreground">Shows as "Busy" without event details</span>
                                                     </div>
-                                                    {et.visibility === 'private' && <Check className="ml-auto h-4 w-4" />}
+                                                    {editing.visibility === 'private' && <Check className="ml-auto h-4 w-4" />}
                                                 </DropdownMenuItem>
                                             </DropdownMenuContent>
                                         </DropdownMenu>
@@ -902,10 +1056,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             variant="outline"
                                             size="sm"
                                             className="h-8"
-                                            onClick={() => toggleEventTypeExpansion(index)}
+                                            onClick={() => setShowOverrides(!showOverrides)}
                                         >
-                                            {expandedEventTypes.includes(index.toString()) ? <ChevronUp className="h-4 w-4 mr-1" /> : <ChevronDown className="h-4 w-4 mr-1" />}
-                                            {expandedEventTypes.includes(index.toString()) ? "Hide Overrides" : "Settings Overrides"}
+                                            {showOverrides ? <ChevronUp className="h-4 w-4 mr-1" /> : <ChevronDown className="h-4 w-4 mr-1" />}
+                                            {showOverrides ? "Hide Overrides" : "Settings Overrides"}
                                         </Button>
                                         <Button
                                             variant="outline"
@@ -915,7 +1069,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 // Encode rather than interpolate raw: a slug saved before
                                                 // toSlug() existed can still hold & or #, and both readers
                                                 // (URLSearchParams and Apps Script's getLocation) decode.
-                                                const url = `${scriptUrl}?event-type=${encodeURIComponent(et.id)}`;
+                                                const url = `${scriptUrl}?event-type=${encodeURIComponent(editing.id)}`;
                                                 navigator.clipboard.writeText(url);
                                             }}
                                         >
@@ -924,15 +1078,52 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                         <Button
                                             variant="outline"
                                             size="sm"
-                                            className="h-8 text-destructive hover:text-destructive hover:bg-destructive/10 ml-auto"
-                                            onClick={() => removeEventType(index)}
+                                            className="h-8 ml-auto"
+                                            onClick={() => duplicateEventType(selectedEventType)}
                                         >
-                                            <Trash2 className="h-4 w-4" />
+                                            <Copy className="h-4 w-4 mr-1" />
+                                            Duplicate
                                         </Button>
+                                        <AlertDialog>
+                                            <AlertDialogTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    className="h-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                                    // Refusing only after the confirmation would be a pointless
+                                                    // detour; removeEventType still guards the rule itself.
+                                                    disabled={config.EVENT_TYPES.length <= 1}
+                                                    title={config.EVENT_TYPES.length <= 1 ? "You must have at least one event type" : undefined}
+                                                >
+                                                    <Trash2 className="h-4 w-4" />
+                                                </Button>
+                                            </AlertDialogTrigger>
+                                            <AlertDialogContent>
+                                                <AlertDialogHeader>
+                                                    <AlertDialogTitle>
+                                                        Delete "{editing.name || "Untitled"}"?
+                                                    </AlertDialogTitle>
+                                                    <AlertDialogDescription>
+                                                        Its overrides and calendar settings go with it, and any link
+                                                        to /{editing.id} stops working once you save. Existing bookings
+                                                        are unaffected.
+                                                    </AlertDialogDescription>
+                                                </AlertDialogHeader>
+                                                <AlertDialogFooter>
+                                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                    <AlertDialogAction
+                                                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                                        onClick={() => removeEventType(selectedEventType)}
+                                                    >
+                                                        Delete
+                                                    </AlertDialogAction>
+                                                </AlertDialogFooter>
+                                            </AlertDialogContent>
+                                        </AlertDialog>
                                     </div>
                                 </div>
 
-                                {expandedEventTypes.includes(index.toString()) && (
+                                {showOverrides && (
                                     <div className="mt-6 pt-6 border-t space-y-6">
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                             {/* Scheduling Window Override */}
@@ -948,8 +1139,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     min="1"
                                                     max="90"
                                                     placeholder={`Global: ${config.MAX_DAYS_IN_ADVANCE}`}
-                                                    value={et.MAX_DAYS_IN_ADVANCE || ""}
-                                                    onChange={(e) => updateEventType(index, { MAX_DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}
+                                                    value={editing.MAX_DAYS_IN_ADVANCE || ""}
+                                                    onChange={(e) => updateEventType(selectedEventType, { MAX_DAYS_IN_ADVANCE: parseInt(e.target.value) || undefined })}
                                                 />
                                             </div>
 
@@ -965,10 +1156,10 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     type="number"
                                                     min="0"
                                                     placeholder={`Global: ${config.MIN_DAYS_IN_ADVANCE ?? 0}`}
-                                                    value={et.MIN_DAYS_IN_ADVANCE ?? ""}
+                                                    value={editing.MIN_DAYS_IN_ADVANCE ?? ""}
                                                     onChange={(e) => {
                                                         const val = parseInt(e.target.value, 10);
-                                                        updateEventType(index, { MIN_DAYS_IN_ADVANCE: isNaN(val) ? undefined : Math.max(0, val) });
+                                                        updateEventType(selectedEventType, { MIN_DAYS_IN_ADVANCE: isNaN(val) ? undefined : Math.max(0, val) });
                                                     }}
                                                 />
                                             </div>
@@ -978,8 +1169,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                 <div className="space-y-1">
                                                     <div className="flex justify-between items-center">
                                                         <Label className="text-sm font-medium">Available Days</Label>
-                                                        {et.WORKDAYS && (
-                                                            <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(index, { WORKDAYS: undefined })}>
+                                                        {editing.WORKDAYS && (
+                                                            <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(selectedEventType, { WORKDAYS: undefined })}>
                                                                 Reset to Global
                                                             </Button>
                                                         )}
@@ -992,13 +1183,13 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     <DropdownMenuTrigger asChild>
                                                         <Button variant="outline" className="w-full justify-between font-normal">
                                                             <span className="truncate">
-                                                                {et.WORKDAYS === undefined
+                                                                {editing.WORKDAYS === undefined
                                                                     ? "Using global settings"
-                                                                    : et.WORKDAYS.length === 0
+                                                                    : editing.WORKDAYS.length === 0
                                                                         ? "No days available"
-                                                                        : et.WORKDAYS.length === 7
+                                                                        : editing.WORKDAYS.length === 7
                                                                             ? "All days"
-                                                                            : `${et.WORKDAYS.length} days selected`}
+                                                                            : `${editing.WORKDAYS.length} days selected`}
                                                             </span>
                                                             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                                                         </Button>
@@ -1006,20 +1197,20 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
                                                         <DropdownMenuItem
                                                             className="text-destructive font-semibold"
-                                                            onClick={() => updateEventType(index, { WORKDAYS: undefined })}
+                                                            onClick={() => updateEventType(selectedEventType, { WORKDAYS: undefined })}
                                                         >
                                                             Reset to Global
                                                         </DropdownMenuItem>
                                                         {DAYS_OF_WEEK.map((day) => (
                                                             <DropdownMenuCheckboxItem
                                                                 key={day.value}
-                                                                checked={(et.WORKDAYS ?? config.WORKDAYS).includes(day.value)}
+                                                                checked={(editing.WORKDAYS ?? config.WORKDAYS).includes(day.value)}
                                                                 onCheckedChange={() => {
-                                                                    const current = et.WORKDAYS ?? config.WORKDAYS;
+                                                                    const current = editing.WORKDAYS ?? config.WORKDAYS;
                                                                     const next = current.includes(day.value)
                                                                         ? current.filter(d => d !== day.value)
                                                                         : [...current, day.value].sort();
-                                                                    updateEventType(index, { WORKDAYS: next });
+                                                                    updateEventType(selectedEventType, { WORKDAYS: next });
                                                                 }}
                                                                 onSelect={(e) => e.preventDefault()}
                                                             >
@@ -1036,8 +1227,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             <div className="space-y-1">
                                                 <div className="flex justify-between items-center">
                                                     <Label className="text-sm font-medium">Max Bookings</Label>
-                                                    {et.maxBookings && (
-                                                        <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(index, { maxBookings: undefined, maxBookingsPeriod: undefined })}>
+                                                    {editing.maxBookings && (
+                                                        <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(selectedEventType, { maxBookings: undefined, maxBookingsPeriod: undefined })}>
                                                             Remove Limit
                                                         </Button>
                                                     )}
@@ -1052,21 +1243,21 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     min={1}
                                                     className="w-28"
                                                     placeholder="No limit"
-                                                    value={et.maxBookings || ""}
+                                                    value={editing.maxBookings || ""}
                                                     onChange={(e) => {
                                                         const val = parseInt(e.target.value) || undefined;
-                                                        updateEventType(index, {
+                                                        updateEventType(selectedEventType, {
                                                             maxBookings: val,
                                                             // Default the period to "week" when a limit is first entered.
-                                                            maxBookingsPeriod: val ? (et.maxBookingsPeriod ?? 'week') : undefined,
+                                                            maxBookingsPeriod: val ? (editing.maxBookingsPeriod ?? 'week') : undefined,
                                                         });
                                                     }}
                                                 />
                                                 <span className="text-muted-foreground text-xs">per</span>
                                                 <DropdownMenu>
-                                                    <DropdownMenuTrigger asChild disabled={!et.maxBookings}>
-                                                        <Button variant="outline" className="justify-between font-normal min-w-[110px]" disabled={!et.maxBookings}>
-                                                            <span className="capitalize">{et.maxBookingsPeriod ?? 'week'}</span>
+                                                    <DropdownMenuTrigger asChild disabled={!editing.maxBookings}>
+                                                        <Button variant="outline" className="justify-between font-normal min-w-[110px]" disabled={!editing.maxBookings}>
+                                                            <span className="capitalize">{editing.maxBookingsPeriod ?? 'week'}</span>
                                                             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                                                         </Button>
                                                     </DropdownMenuTrigger>
@@ -1075,7 +1266,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                             <DropdownMenuItem
                                                                 key={p}
                                                                 className="capitalize"
-                                                                onClick={() => updateEventType(index, { maxBookingsPeriod: p })}
+                                                                onClick={() => updateEventType(selectedEventType, { maxBookingsPeriod: p })}
                                                             >
                                                                 {p}
                                                             </DropdownMenuItem>
@@ -1090,8 +1281,8 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             <div className="space-y-1">
                                                 <div className="flex justify-between items-center">
                                                     <Label className="text-sm font-medium">Work Hours</Label>
-                                                    {et.WORKHOURS && (
-                                                        <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(index, { WORKHOURS: undefined })}>
+                                                    {editing.WORKHOURS && (
+                                                        <Button variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={() => updateEventType(selectedEventType, { WORKHOURS: undefined })}>
                                                             Reset to Global
                                                         </Button>
                                                     )}
@@ -1102,20 +1293,20 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </div>
                                             <div className="flex items-center gap-3">
                                                 <TimeDropdown
-                                                    value={et.WORKHOURS?.start}
+                                                    value={editing.WORKHOURS?.start}
                                                     placeholder="Using global settings"
                                                     onChange={(val) => {
-                                                        const current = et.WORKHOURS ?? config.WORKHOURS;
-                                                        updateEventType(index, { WORKHOURS: { ...current, start: val } });
+                                                        const current = editing.WORKHOURS ?? config.WORKHOURS;
+                                                        updateEventType(selectedEventType, { WORKHOURS: { ...current, start: val } });
                                                     }}
                                                 />
                                                 <span className="text-muted-foreground text-xs">to</span>
                                                 <TimeDropdown
-                                                    value={et.WORKHOURS?.end}
+                                                    value={editing.WORKHOURS?.end}
                                                     placeholder="Using global settings"
                                                     onChange={(val) => {
-                                                        const current = et.WORKHOURS ?? config.WORKHOURS;
-                                                        updateEventType(index, { WORKHOURS: { ...current, end: val } });
+                                                        const current = editing.WORKHOURS ?? config.WORKHOURS;
+                                                        updateEventType(selectedEventType, { WORKHOURS: { ...current, end: val } });
                                                     }}
                                                 />
                                             </div>
@@ -1131,17 +1322,21 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     </p>
                                                 </div>
                                                 <CalendarMultiSelect
-                                                    selected={et.CALENDARS ?? config.CALENDARS}
+                                                    selected={editing.CALENDARS ?? config.CALENDARS}
                                                     available={availableCalendars}
-                                                    placeholder={et.CALENDARS === undefined ? "Using global settings" : "Select calendars..."}
-                                                    onChange={(vals) => updateEventType(index, { CALENDARS: vals })}
+                                                    placeholder={editing.CALENDARS === undefined ? "Using global settings" : "Select calendars..."}
+                                                    onChange={(vals) => updateEventType(selectedEventType, { CALENDARS: vals })}
                                                 />
-                                                {et.CALENDARS !== undefined && (
+                                                <CalendarAccessWarning
+                                                    ids={editing.CALENDARS ?? config.CALENDARS}
+                                                    unreachable={unreachableCalendars}
+                                                />
+                                                {editing.CALENDARS !== undefined && (
                                                     <Button
                                                         variant="link"
                                                         size="sm"
                                                         className="h-auto p-0 text-destructive mt-1"
-                                                        onClick={() => updateEventType(index, { CALENDARS: undefined })}
+                                                        onClick={() => updateEventType(selectedEventType, { CALENDARS: undefined })}
                                                     >
                                                         Reset to Global
                                                     </Button>
@@ -1149,16 +1344,16 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             </div>
 
                                             {/* Scheduling Strategy Override */}
-                                            {(et.CALENDARS ?? config.CALENDARS).length > 1 && (
+                                            {(editing.CALENDARS ?? config.CALENDARS).length > 1 && (
                                                 <div className="space-y-2">
                                                     <div className="flex justify-between items-center">
                                                         <Label className="text-sm font-medium">Scheduling Strategy</Label>
-                                                        {et.schedulingStrategy && (
+                                                        {editing.schedulingStrategy && (
                                                             <Button
                                                                 variant="link"
                                                                 size="sm"
                                                                 className="h-auto p-0 text-destructive"
-                                                                onClick={() => updateEventType(index, { schedulingStrategy: undefined })}
+                                                                onClick={() => updateEventType(selectedEventType, { schedulingStrategy: undefined })}
                                                             >
                                                                 Reset to Global
                                                             </Button>
@@ -1172,13 +1367,13 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                             <Button variant="outline" className="w-full justify-between font-normal h-auto min-h-10">
                                                                 <div className="flex flex-col items-start gap-0.5 text-left py-1">
                                                                     <span className="font-medium">
-                                                                        {et.schedulingStrategy
-                                                                            ? (et.schedulingStrategy === 'round_robin' ? 'Round Robin' : 'Collective')
+                                                                        {editing.schedulingStrategy
+                                                                            ? (editing.schedulingStrategy === 'round_robin' ? 'Round Robin' : 'Collective')
                                                                             : (config.schedulingStrategy === 'round_robin' ? 'Round Robin (Global)' : 'Collective (Global)')
                                                                         }
                                                                     </span>
                                                                     <span className="text-[10px] text-muted-foreground font-normal">
-                                                                        {et.schedulingStrategy === 'round_robin' || (!et.schedulingStrategy && config.schedulingStrategy === 'round_robin')
+                                                                        {editing.schedulingStrategy === 'round_robin' || (!editing.schedulingStrategy && config.schedulingStrategy === 'round_robin')
                                                                             ? 'Book if ANY calendar is free'
                                                                             : 'Book only if ALL calendars are free'}
                                                                     </span>
@@ -1189,23 +1384,23 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                         <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
                                                             <DropdownMenuItem
                                                                 className="text-destructive font-semibold"
-                                                                onClick={() => updateEventType(index, { schedulingStrategy: undefined })}
+                                                                onClick={() => updateEventType(selectedEventType, { schedulingStrategy: undefined })}
                                                             >
                                                                 Reset to Global
                                                             </DropdownMenuItem>
-                                                            <DropdownMenuItem onClick={() => updateEventType(index, { schedulingStrategy: 'collective' })}>
+                                                            <DropdownMenuItem onClick={() => updateEventType(selectedEventType, { schedulingStrategy: 'collective' })}>
                                                                 <div className="flex flex-col gap-1">
                                                                     <span>Collective</span>
                                                                     <span className="text-xs text-muted-foreground">All calendars must be free. Best for panels or when everyone is needed.</span>
                                                                 </div>
-                                                                {(et.schedulingStrategy === 'collective' || (!et.schedulingStrategy && (!config.schedulingStrategy || config.schedulingStrategy === 'collective'))) && <Check className="ml-auto h-4 w-4" />}
+                                                                {(editing.schedulingStrategy === 'collective' || (!editing.schedulingStrategy && (!config.schedulingStrategy || config.schedulingStrategy === 'collective'))) && <Check className="ml-auto h-4 w-4" />}
                                                             </DropdownMenuItem>
-                                                            <DropdownMenuItem onClick={() => updateEventType(index, { schedulingStrategy: 'round_robin' })}>
+                                                            <DropdownMenuItem onClick={() => updateEventType(selectedEventType, { schedulingStrategy: 'round_robin' })}>
                                                                 <div className="flex flex-col gap-1">
                                                                     <span>Round Robin</span>
                                                                     <span className="text-xs text-muted-foreground">Any calendar can be free. Best for distributing calls among a team.</span>
                                                                 </div>
-                                                                {(et.schedulingStrategy === 'round_robin' || (!et.schedulingStrategy && config.schedulingStrategy === 'round_robin')) && <Check className="ml-auto h-4 w-4" />}
+                                                                {(editing.schedulingStrategy === 'round_robin' || (!editing.schedulingStrategy && config.schedulingStrategy === 'round_robin')) && <Check className="ml-auto h-4 w-4" />}
                                                             </DropdownMenuItem>
                                                         </DropdownMenuContent>
                                                     </DropdownMenu>
@@ -1216,12 +1411,12 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                             <div className="space-y-2">
                                                 <div className="flex justify-between items-center">
                                                     <Label className="text-sm font-medium">Host Calendar</Label>
-                                                    {et.hostCalendar !== undefined && (
+                                                    {editing.hostCalendar !== undefined && (
                                                         <Button
                                                             variant="link"
                                                             size="sm"
                                                             className="h-auto p-0 text-destructive"
-                                                            onClick={() => updateEventType(index, { hostCalendar: undefined })}
+                                                            onClick={() => updateEventType(selectedEventType, { hostCalendar: undefined })}
                                                         >
                                                             Reset to Global
                                                         </Button>
@@ -1231,20 +1426,24 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                                     Override which calendar the event is created on.
                                                 </p>
                                                 <CalendarSingleSelect
-                                                    value={et.hostCalendar ?? config.hostCalendar ?? ""}
+                                                    value={editing.hostCalendar ?? config.hostCalendar ?? ""}
                                                     available={availableCalendars}
-                                                    placeholder={et.hostCalendar === undefined ? "Using global settings" : "No fixed host (use strategy)"}
+                                                    placeholder={editing.hostCalendar === undefined ? "Using global settings" : "No fixed host (use strategy)"}
                                                     noneLabel="No fixed host (use strategy)"
-                                                    onChange={(val) => updateEventType(index, { hostCalendar: val })}
+                                                    onChange={(val) => updateEventType(selectedEventType, { hostCalendar: val })}
                                                 />
-                                                {(et.hostCalendar ?? config.hostCalendar ?? "") !== "" && (
+                                                <CalendarAccessWarning
+                                                    ids={[editing.hostCalendar ?? config.hostCalendar]}
+                                                    unreachable={unreachableCalendars}
+                                                />
+                                                {(editing.hostCalendar ?? config.hostCalendar ?? "") !== "" && (
                                                     <div className="flex items-center gap-3 pt-1">
                                                         <Switch
-                                                            checked={et.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false}
-                                                            onCheckedChange={(checked) => updateEventType(index, { inviteAvailabilityCalendars: checked })}
+                                                            checked={editing.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false}
+                                                            onCheckedChange={(checked) => updateEventType(selectedEventType, { inviteAvailabilityCalendars: checked })}
                                                         />
                                                         <span className="text-xs text-muted-foreground">
-                                                            {(et.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false)
+                                                            {(editing.inviteAvailabilityCalendars ?? config.inviteAvailabilityCalendars ?? false)
                                                                 ? "Monitored calendars invited as attendees"
                                                                 : "Monitored calendars checked for conflicts only"}
                                                         </span>
@@ -1256,7 +1455,7 @@ export function ConfigScreen({ onBack }: { onBack: () => void }) {
                                     </div>
                                 )}
                             </Card>
-                        ))}
+                        )}
                     </div>
                 </div>
             </CardContent >

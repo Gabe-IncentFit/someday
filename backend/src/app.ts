@@ -217,6 +217,33 @@ function listCalendars() {
   }));
 }
 
+// Reports which of `calendarIds` this script can actually read free/busy for.
+//
+// Availability fails closed: a calendar whose freebusy can't be trusted counts
+// as busy, so a single unreadable calendar in a collective set (or a fixed host,
+// which forces collective semantics) silently empties the entire calendar. The
+// owner sees an unbookable page and nothing explaining it.
+//
+// Membership in listCalendars() is the wrong test — that's the owner's calendar
+// list, and a colleague's calendar is usually readable without being on it. So
+// this asks the same question fetchAvailability does, through the same freebusy
+// call and the same freebusyIntervals predicate, and cannot drift from it.
+function checkCalendarAccess(calendarIds: string[]): { id: string; readable: boolean }[] {
+  if (!isOwner()) {
+    throw new Error("Unauthorized: Only the script owner can check calendar access.");
+  }
+  const ids = (calendarIds || []).filter((id) => !!id);
+  if (ids.length === 0) return [];
+
+  const now = new Date();
+  const lookup = queryFreebusy(ids, now, new Date(now.getTime() + 60000));
+
+  return ids.map((id: string) => ({
+    id,
+    readable: lookup(id) !== null,
+  }));
+}
+
 function getScriptUrl(): string {
   return ScriptApp.getService().getUrl();
 }
@@ -449,6 +476,60 @@ function freebusyIntervals(
   }));
 }
 
+// 'primary' and the script owner's own address are two names for one calendar,
+// and freebusy answers per calendar, not per name: a batch asking under both
+// gets a single entry back, keyed by whichever name it saw first. The other name
+// then has no entry, which freebusyIntervals reads as untrustworthy and every
+// caller fails closed to busy — so naming one calendar twice made it permanently
+// busy, vetoing every slot on it and reporting nothing.
+let primaryCalendarIdCache: string | null = null;
+function primaryCalendarId(): string {
+  if (primaryCalendarIdCache === null) {
+    try {
+      primaryCalendarIdCache = Session.getEffectiveUser().getEmail() || 'primary';
+    } catch (e) {
+      // Leave 'primary' unresolved rather than guess: the alias then collapses
+      // as before, which is today's behavior, not a new failure.
+      primaryCalendarIdCache = 'primary';
+    }
+  }
+  return primaryCalendarIdCache;
+}
+
+function canonicalCalendarId(calendarId: string): string {
+  const trimmed = (calendarId || '').trim();
+  return trimmed.toLowerCase() === 'primary' ? primaryCalendarId() : trimmed;
+}
+
+// One freebusy query for `calendarIds`, returning a lookup by the id the caller
+// asked about — including two ids that turn out to be the same calendar. Every
+// caller goes through here so the response is always read under the same name it
+// was requested under.
+function queryFreebusy(
+  calendarIds: string[],
+  timeMin: Date,
+  timeMax: Date
+): (calendarId: string) => { start: Date; end: Date }[] | null {
+  const canonicalById: Record<string, string> = {};
+  const items: { id: string }[] = [];
+  calendarIds.forEach((calendarId: string) => {
+    const canonical = canonicalCalendarId(calendarId);
+    canonicalById[calendarId] = canonical;
+    if (!items.some((item) => item.id === canonical)) {
+      items.push({ id: canonical });
+    }
+  });
+
+  const response = Calendar.Freebusy!.query({
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    items,
+  });
+
+  return (calendarId: string) =>
+    freebusyIntervals(response, canonicalById[calendarId]);
+}
+
 // Resolve an event type's calendar settings into the three roles the booking
 // flow needs, which the single CALENDARS list used to conflate:
 //   availability — whose free/busy gates whether a slot is offered/bookable.
@@ -521,17 +602,13 @@ function fetchAvailability(eventTypeId?: string): {
     ? tzMidnightPlusDays(now, timeZone, minDaysInAdvance)
     : now;
 
-  const response = Calendar.Freebusy!.query({
-    timeMin: now.toISOString(),
-    timeMax: end.toISOString(),
-    items: calendarsToQuery.map((id: string) => ({ id })),
-  });
+  const freebusy = queryFreebusy(calendarsToQuery, now, end);
 
   // null for a calendar means its freebusy couldn't be trusted (errored /
   // inaccessible); such calendars are treated as busy below (fail closed).
   const eventsByCalendar: Record<string, { start: Date; end: Date }[] | null> = {};
   calendarsToQuery.forEach((calendarId: string) => {
-    eventsByCalendar[calendarId] = freebusyIntervals(response, calendarId);
+    eventsByCalendar[calendarId] = freebusy(calendarId);
   });
 
   // If a max-bookings limit is active, count existing bookings once over the
@@ -741,14 +818,10 @@ function bookTimeslot(
   // can name it in access errors.
   let targetCalendarId = policy.host || policy.conflict[0];
   try {
-    const possibleEvents = Calendar.Freebusy!.query({
-      timeMin: startTime.toISOString(),
-      timeMax: endTime.toISOString(),
-      items: policy.conflict.map((id: string) => ({ id })),
-    });
+    const freebusy = queryFreebusy(policy.conflict, startTime, endTime);
 
     const freeCalendars = policy.conflict.filter((calId: string) => {
-      const intervals = freebusyIntervals(possibleEvents, calId);
+      const intervals = freebusy(calId);
       // null = errored/inaccessible calendar; not free (fail closed).
       return intervals !== null && intervals.length === 0;
     });
